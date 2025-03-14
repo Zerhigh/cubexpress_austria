@@ -7,6 +7,9 @@ import pandas as pd
 import geopandas as gpd
 from typing import Tuple, List, Optional
 import utm
+from tqdm import tqdm
+import cubexpress
+from typing import List, Optional
 
 # --------------------------------------------------
 # Initialize the Earth Engine API
@@ -14,7 +17,7 @@ import utm
 try:
     ee.Initialize()
 except Exception:
-    ee.Authenticate(auth_mode="colab")
+    ee.Authenticate(auth_mode="notebook")
     ee.Initialize()
 
 def query_utm_crs_info(
@@ -59,7 +62,7 @@ def image_to_feature(img: ee.Image) -> ee.Feature:
 # --------------------------------------------------
 # Load and preprocess input points
 # --------------------------------------------------
-points: gpd.GeoDataFrame = gpd.read_file("data/stratified_S2_points_wdate.gpkg")
+points: gpd.GeoDataFrame = gpd.read_file("data/stratified_ALL_S2_points_wdate.gpkg")
 
 # Define date ranges around the 'Date' column
 points["be_date"] = (points["Date"] - pd.Timedelta(days=100)).dt.strftime('%Y-%m-%d')
@@ -72,7 +75,7 @@ dfs_list: List[Optional[pd.DataFrame]] = []
 # --------------------------------------------------
 # Main loop: process each point to filter S2 (Sentinel-2) images
 # --------------------------------------------------
-for i, row in points.iterrows():
+for i, row in tqdm(points[:20].iterrows()):
     # Derive UTM CRS based on point location
     _, _, crs = query_utm_crs_info(row.lon, row.lat)
 
@@ -167,9 +170,6 @@ for i, row in points.iterrows():
         # In case of errors, append None
         dfs_list.append(None)
 
-    # Print the current iteration index to track progress in the console
-    print(i)
-
 # --------------------------------------------------
 # Merge results and export
 # --------------------------------------------------
@@ -177,41 +177,45 @@ for i, row in points.iterrows():
 geo_dataframe = gpd.GeoDataFrame(pd.concat(dfs_list, ignore_index=True), crs="EPSG:4326")
 
 # Save as a GeoPackage (vector file) and CSV
-geo_dataframe.to_file("tables/stratified_S2_points_wdate_filter.gpkg", driver="GPKG")
-geo_dataframe.drop(columns=["geometry"]).to_csv("tables/stratified_S2_points_wdate_filter.csv", index=False)
+geo_dataframe.to_file("tables/stratified_ALL_S2_points_wdate_filter.gpkg", driver="GPKG")
+geo_dataframe.drop(columns=["geometry"]).to_csv("tables/stratified_ALL_S2_points_wdate_filter.csv", index=False)
 
 
 #######################################
 ############# Download S2 #############
 #######################################
 
-import ee
-import pandas as pd
-import cubexpress
-import geopandas as gpd
-from typing import List, Optional
-
 # --------------------------------------------------
 # Initialize Earth Engine
 # --------------------------------------------------
-try:
-    ee.Initialize()
-except Exception:
-    ee.Authenticate(auth_mode="colab")
-    ee.Initialize()
+# try:
+#     ee.Initialize()
+# except Exception:
+#     ee.Authenticate(auth_mode="colab")
+#     ee.Initialize()
 
 # --------------------------------------------------
 # Load the table containing Sentinel-2 metadata
 # --------------------------------------------------
-table: pd.DataFrame = pd.read_csv("tables/stratified_S2_points_wdate_filter.csv")
+table: pd.DataFrame = pd.read_csv("tables/stratified_ALL_S2_points_wdate_filter.csv")
 
-# Create a unique download ID for each row
-table["s2_download_id"] = [
-    f"S2_{i:05d}" for i in range(len(table))
+# Selecting the best of the best by ID
+df_sorted = table.sort_values(
+    by = ["id", "abs_days_diff", "cs_cdf"],
+    ascending=[True, True, False]
+)
+
+df_selected = df_sorted.groupby("id") \
+                       .first() \
+                       .reset_index()
+
+# You can change this because it's just a way to put new ids
+df_selected["s2_download_id"] = [
+    f"S2_U_{i:05d}" for i in range(len(df_selected))
 ]
 
 # Filter out unique Sentinel-2 IDs
-filter_ids: List[str] = table["s2_id"].unique().tolist()
+filter_ids: List[str] = df_selected["s2_id"].unique().tolist()
 
 # --------------------------------------------------
 # Check if IDs are in the SR (Surface Reflectance) collection
@@ -245,17 +249,19 @@ def build_sentinel2_path(s2_id: str) -> str:
         return f"UNKNOWN/{s2_id}"
 
 # Build full Sentinel-2 paths in the table
-table["s2_full_id"] = table["s2_id"].apply(build_sentinel2_path)
+df_selected["s2_full_id"] = df_selected["s2_id"].apply(build_sentinel2_path)
 
 # Filter the dataframe for SR images only
-df_filtered: pd.DataFrame = table[
-    table["s2_full_id"].str.startswith("COPERNICUS/S2_SR_HARMONIZED/")
+df_filtered: pd.DataFrame = df_selected[
+    df_selected["s2_full_id"].str.startswith("COPERNICUS/S2_SR_HARMONIZED/")
 ].copy()
+
+df_filtered.to_csv('tables/download_stratified_ALL_S2_points_wdate_filter.csv')
 
 # --------------------------------------------------
 # Download with cubexpress
 # --------------------------------------------------
-for i, row in df_filtered.iterrows():
+for i, row in tqdm(df_filtered.iterrows()):
     # Prepare the raster transform
     geotransform = cubexpress.lonlat2rt(
         lon=row["lon"],
@@ -282,7 +288,7 @@ for i, row in df_filtered.iterrows():
     # Fetch the data cube
     cubexpress.getcube(
         request=cube_requests,
-        output_path="output_s2",  # directory for output
+        output_path="output",  # directory for output
         nworkers=4,              # parallel workers
         max_deep_level=5         # maximum concurrency with Earth Engine
     )
