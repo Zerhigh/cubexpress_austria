@@ -1,7 +1,6 @@
 ################################################
 ############# Generate S2 metadata #############
 ################################################
-
 import ee
 import pandas as pd
 import geopandas as gpd
@@ -10,6 +9,11 @@ import utm
 from tqdm import tqdm
 import cubexpress
 from typing import List, Optional
+
+
+from pathlib import Path
+#BASE = Path('drive/MyDrive/Colab Notebooks/')
+BASE = Path('')
 
 # --------------------------------------------------
 # Initialize the Earth Engine API
@@ -62,7 +66,7 @@ def image_to_feature(img: ee.Image) -> ee.Feature:
 # --------------------------------------------------
 # Load and preprocess input points
 # --------------------------------------------------
-points: gpd.GeoDataFrame = gpd.read_file("data/stratified_ALL_S2_points_wdate.gpkg")
+points: gpd.GeoDataFrame = gpd.read_file(BASE / "data/stratified_ALL_S2_points_wdate.gpkg")
 
 # Define date ranges around the 'Date' column
 points["be_date"] = (points["Date"] - pd.Timedelta(days=100)).dt.strftime('%Y-%m-%d')
@@ -75,7 +79,7 @@ dfs_list: List[Optional[pd.DataFrame]] = []
 # --------------------------------------------------
 # Main loop: process each point to filter S2 (Sentinel-2) images
 # --------------------------------------------------
-for i, row in tqdm(points[:20].iterrows()):
+for i, row in tqdm(points.iterrows()):
     # Derive UTM CRS based on point location
     _, _, crs = query_utm_crs_info(row.lon, row.lat)
 
@@ -177,8 +181,8 @@ for i, row in tqdm(points[:20].iterrows()):
 geo_dataframe = gpd.GeoDataFrame(pd.concat(dfs_list, ignore_index=True), crs="EPSG:4326")
 
 # Save as a GeoPackage (vector file) and CSV
-geo_dataframe.to_file("tables/stratified_ALL_S2_points_wdate_filter.gpkg", driver="GPKG")
-geo_dataframe.drop(columns=["geometry"]).to_csv("tables/stratified_ALL_S2_points_wdate_filter.csv", index=False)
+geo_dataframe.to_file(BASE / "tables/stratified_ALL_S2_points_wdate_filter.gpkg", driver="GPKG")
+geo_dataframe.drop(columns=["geometry"]).to_csv(BASE / "tables/stratified_ALL_S2_points_wdate_filter.csv", index=False)
 
 
 #######################################
@@ -197,7 +201,7 @@ geo_dataframe.drop(columns=["geometry"]).to_csv("tables/stratified_ALL_S2_points
 # --------------------------------------------------
 # Load the table containing Sentinel-2 metadata
 # --------------------------------------------------
-table: pd.DataFrame = pd.read_csv("tables/stratified_ALL_S2_points_wdate_filter.csv")
+table: pd.DataFrame = pd.read_csv(BASE / "tables/stratified_ALL_S2_points_wdate_filter.csv")
 
 # Selecting the best of the best by ID
 df_sorted = table.sort_values(
@@ -256,7 +260,7 @@ df_filtered: pd.DataFrame = df_selected[
     df_selected["s2_full_id"].str.startswith("COPERNICUS/S2_SR_HARMONIZED/")
 ].copy()
 
-df_filtered.to_csv('tables/download_stratified_ALL_S2_points_wdate_filter.csv')
+df_filtered.to_csv(BASE / 'tables/download_stratified_ALL_S2_points_wdate_filter.csv')
 
 # --------------------------------------------------
 # Download with cubexpress
@@ -288,7 +292,7 @@ for i, row in tqdm(df_filtered.iterrows()):
     # Fetch the data cube
     cubexpress.getcube(
         request=cube_requests,
-        output_path="output",  # directory for output
+        output_path=BASE / "output",  # directory for output
         nworkers=4,              # parallel workers
         max_deep_level=5         # maximum concurrency with Earth Engine
     )
