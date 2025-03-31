@@ -71,7 +71,7 @@ def image_to_feature(img: ee.Image) -> ee.Feature:
 #BASE = Path('drive/MyDrive/Colab Notebooks/')
 BASE = Path('')
 
-sampling_path: Path = Path("C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/sampling")
+sampling_path: Path = Path("C:/Users/shollend/data/metadata")
 CDF_TRESHHOLD = 0.85
 
 points: gpd.GeoDataFrame = gpd.read_file(sampling_path / "ALL_S2_points_regular_grid_s2download.gpkg")
@@ -190,7 +190,7 @@ def _parallel(row: pd.Series) -> Tuple[str, pd.DataFrame | None]:
 
 
 def parallel() -> list:
-    rows = [row for _, row in points.iterrows()]
+    rows = [row for _, row in points[:10].iterrows()]
 
     with Pool(processes=os.cpu_count()) as pool:
         results = list(tqdm(pool.imap_unordered(_parallel, rows), total=len(rows), desc="Processing"))
@@ -212,7 +212,6 @@ if __name__ == '__main__':
     result = parallel()
     print(f'took: {round(time.time()-start, 2)}s')
 
-
     not_found = []
     for i, val in result:
         if val is None:
@@ -224,7 +223,7 @@ if __name__ == '__main__':
     # Prepare a list to hold all filtered results
     dfs_list: List[Optional[pd.DataFrame]] = [val for i, val in result]
     if len(dfs_list) < 1:
-        raise "error, nothing found"
+        raise TypeError("error, nothing found")
 
     # Combine all dataframes into a single GeoDataFrame
     geo_dataframe = gpd.GeoDataFrame(pd.concat(dfs_list, ignore_index=True), crs="EPSG:4326")
