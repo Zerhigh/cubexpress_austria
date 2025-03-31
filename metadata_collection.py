@@ -190,7 +190,7 @@ def _parallel(row: pd.Series) -> Tuple[str, pd.DataFrame | None]:
 
 
 def parallel() -> list:
-    rows = [row for _, row in points[:10].iterrows()]
+    rows = [row for _, row in points.iterrows()]
 
     with Pool(processes=os.cpu_count()) as pool:
         results = list(tqdm(pool.imap_unordered(_parallel, rows), total=len(rows), desc="Processing"))
