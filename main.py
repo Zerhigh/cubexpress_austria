@@ -79,7 +79,7 @@ dfs_list: List[Optional[pd.DataFrame]] = []
 # --------------------------------------------------
 # Main loop: process each point to filter S2 (Sentinel-2) images
 # --------------------------------------------------
-for i, row in tqdm(points.iterrows()):
+for i, row in tqdm(points[:25000].iterrows()):
     # Derive UTM CRS based on point location
     _, _, crs = query_utm_crs_info(row.lon, row.lat)
 
@@ -170,6 +170,13 @@ for i, row in tqdm(points.iterrows()):
             # Collect the results in a list
             dfs_list.append(df_final)
 
+        if i % 10000 == 0 and i != 0:
+            geo_dataframe_temp = gpd.GeoDataFrame(pd.concat(dfs_list, ignore_index=True), crs="EPSG:4326")
+
+            # Save as a GeoPackage (vector file) and CSV
+            geo_dataframe_temp.to_file(BASE / f"tables/stratified_ALL_S2_points_wdate_filter_{i}.gpkg", driver="GPKG")
+            geo_dataframe_temp.drop(columns=["geometry"]).to_csv(BASE / f"tables/stratified_ALL_S2_points_wdate_filter_{i}.csv",
+                                                            index=False)
     except Exception as e:
         # In case of errors, append None
         dfs_list.append(None)
@@ -265,6 +272,8 @@ df_filtered.to_csv(BASE / 'tables/download_stratified_ALL_S2_points_wdate_filter
 # --------------------------------------------------
 # Download with cubexpress
 # --------------------------------------------------
+
+print('downloading sentinel2')
 for i, row in tqdm(df_filtered.iterrows()):
     # Prepare the raster transform
     geotransform = cubexpress.lonlat2rt(
