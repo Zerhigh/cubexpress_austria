@@ -200,7 +200,7 @@ def parallel() -> list:
 
 def sequential() -> list:
     results = []
-    for _, row in tqdm(points[:100].iterrows()):
+    for _, row in tqdm(points.iterrows()):
         results.append(_parallel(row))
 
     return results
