@@ -12,10 +12,8 @@ from typing import List, Optional
 
 
 from pathlib import Path
-#BASE = Path('drive/MyDrive/Colab Notebooks/')
-BASE = Path('')
 
-# --------------------------------------------------
+# ----------------------------------------------
 # Initialize the Earth Engine API
 # --------------------------------------------------
 try:
@@ -66,11 +64,16 @@ def image_to_feature(img: ee.Image) -> ee.Feature:
 # --------------------------------------------------
 # Load and preprocess input points
 # --------------------------------------------------
-points: gpd.GeoDataFrame = gpd.read_file(BASE / "data/stratified_ALL_S2_points_wdate.gpkg")
+
+#BASE = Path('drive/MyDrive/Colab Notebooks/')
+BASE = Path('')
+
+sampling_path: Path = Path("C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/sampling")
+points: gpd.GeoDataFrame = gpd.read_file(sampling_path / "ALL_S2_points_regular_grid_s2download.gpkg")
 
 # Define date ranges around the 'Date' column
-points["be_date"] = (points["Date"] - pd.Timedelta(days=100)).dt.strftime('%Y-%m-%d')
-points["af_date"] = (points["Date"] + pd.Timedelta(days=100)).dt.strftime('%Y-%m-%d')
+points["start_date"] = points["beginLifeS"].dt.strftime('%Y-%m-%d')
+points["end_date"] = points["endLifeSpa"].dt.strftime('%Y-%m-%d')
 points["base_date"] = points["Date"].dt.strftime('%Y-%m-%d')
 
 # Prepare a list to hold all filtered results
@@ -79,7 +82,7 @@ dfs_list: List[Optional[pd.DataFrame]] = []
 # --------------------------------------------------
 # Main loop: process each point to filter S2 (Sentinel-2) images
 # --------------------------------------------------
-for i, row in tqdm(points[:25000].iterrows()):
+for i, row in tqdm(points.iterrows()):
     # Derive UTM CRS based on point location
     _, _, crs = query_utm_crs_info(row.lon, row.lat)
 
@@ -89,7 +92,7 @@ for i, row in tqdm(points[:25000].iterrows()):
     # Create an ImageCollection filtered by date, bounding area, and band
     ic: ee.ImageCollection = (
         ee.ImageCollection("GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED")
-        .filterDate(row["be_date"], row["af_date"])
+        .filterDate(row["start_date"], row["end_date"])
         .filterBounds(center)
         .select("cs_cdf")
     )
@@ -216,9 +219,7 @@ df_sorted = table.sort_values(
     ascending=[True, True, False]
 )
 
-df_selected = df_sorted.groupby("id") \
-                       .first() \
-                       .reset_index()
+df_selected = df_sorted.groupby("id").first().reset_index()
 
 # You can change this because it's just a way to put new ids
 df_selected["s2_download_id"] = [
