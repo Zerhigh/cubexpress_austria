@@ -204,11 +204,11 @@ if __name__ == '__main__':
     points["end_date"] = points["endLifeSpa"].dt.strftime('%Y-%m-%d')
     points["base_date"] = points["Date"].dt.strftime('%Y-%m-%d')
 
-    #sample = points.sample(n=200)
+    sample = points.sample(n=200)
 
     print('start')
     start = time.time()
-    result = parallel(df=points)
+    result = parallel(df=sample)
     print(f'took: {round(time.time()-start, 2)}s')
 
     # Prepare a list to hold all filtered results
@@ -231,6 +231,6 @@ if __name__ == '__main__':
     filtered_sample = points[points['id'].isin(id_list_none)]
 
     # Save as a GeoPackage (vector file) and CSV
-    geo_dataframe.to_file(BASE / "tables" / "ccs_090_ALL_S2_filter.gpkg", driver="GPKG")
-    filtered_sample.to_file(BASE / "tables" / "NOT_090_FOUND_S2_filter.gpkg", driver="GPKG")
-    #geo_dataframe.drop(columns=["geometry"]).to_csv(BASE / "tables" / "ALL_S2_filter.csv", index=False)
+    geo_dataframe.to_file(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200.gpkg", driver="GPKG")
+    filtered_sample.to_file(BASE / "tables" / "NOT_090_FOUND_S2_filter_sample200.gpkg", driver="GPKG")
+    geo_dataframe.drop(columns=["geometry"]).to_csv(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200.csv", index=False)
