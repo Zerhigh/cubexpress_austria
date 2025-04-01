@@ -45,5 +45,11 @@ def singletimeadd():
 
 
 BASE = Path('')
-df_filtered: pd.DataFrame = pd.read_csv(BASE / "tables" / "merged_ALL_S2_filter.csv")
+#df_filtered: pd.DataFrame = pd.read_csv(BASE / "tables" / "merged_ALL_S2_filter.csv")
+# sample = df_filtered[:200]
+#sample.to_csv(BASE / "local_experiment" / "sample_s2.csv")
+df = pd.read_csv(BASE / "local_experiment" / "sample_s2.csv")
+groups = [int(i) for i in set(df['id'].values)]
+print(groups)
+
 pass

@@ -1,8 +1,10 @@
 import ee
 import numpy as np
 import pandas as pd
+from osgeo import gdal # Import gdal before rasterio
 import geopandas as gpd
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Any, Dict
+import rasterio
 import utm
 import os
 from pathlib import Path
@@ -10,6 +12,9 @@ from tqdm import tqdm
 import cubexpress
 from typing import List, Optional
 from utils_histogram import *
+
+from rasterio.warp import reproject, Resampling
+from shapely.geometry import box
 
 from multiprocessing import Pool
 from multiprocessing import get_context
@@ -27,7 +32,13 @@ except Exception:
     ee.Authenticate(auth_mode="notebook")
     ee.Initialize()
 
-BASE = Path('')
+BASE = Path('local_experiment')
+LABELS = (0, 40, 41, 42, 48, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 72, 83, 84, 87, 88, 92, 95, 96)
+IMG_SHAPE = [512, 512]
+# austria = gpd.read_file('C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/oesterreich_border/oesterreich.shp')
+# austria32 = austria.to_crs('32632')
+# austria33 = austria.to_crs('32633')
+# GEOMS = {32: austria32.loc[[0], 'geometry'].values[0], 33: austria33.loc[[0], 'geometry'].values[0]}
 
 
 def image_match(hr: np.array, lr: np.array) -> np.array:
@@ -96,11 +107,75 @@ def add_more_metadata(input_table: pd.DataFrame) -> pd.DataFrame:
     return df_filtered
 
 
+def load_s2_tiles(path_list: List[Path]) -> Tuple[Any, Dict[str, Any]]:
+    profiles = []
+    data = {}
+    for file in path_list:
+        name = file.name
+        with rasterio.open(file, 'r') as src:
+            profiles.append(src.profile)
+            data[name] = src.read()
+
+    # verify profiles are the same
+    return profiles[0], data
+
+
+def transform_ortho(ortho_fp: str | Path,
+                    s2_crs: str,
+                    s2_transform: rasterio.transform.Affine,
+                    s2_width: int,
+                    s2_height: int) -> np.ndarray | Tuple[np.ndarray, Dict]:
+
+    # open orthofoto image tile
+    with rasterio.open(ortho_fp) as osrc:
+        src_data = osrc.read()
+        src_crs = osrc.crs
+
+        # define empt arrar and reproject data into it
+        dst_data = np.zeros(shape=(osrc.count, s2_width, s2_height), dtype='uint8')
+
+        a, _ = reproject(
+            source=src_data,
+            destination=dst_data,
+            src_transform=osrc.transform,
+            src_crs=src_crs,
+            dst_transform=s2_transform,
+            dst_crs=s2_crs,
+            resampling=Resampling.nearest
+        )
+
+        profile = osrc.profile
+        profile.update(transform=s2_transform, crs=s2_crs, width=s2_width, height=s2_height)
+
+        # write data to file
+        # with rasterio.open(ortho_op, 'w+', **profile) as dst:
+        #     dst.write(dst_data)
+
+        # if its the mask, recalculate the statitics
+        sats = {}
+        if osrc.count == 1:
+            # update metadata count etc
+            num_px = s2_width * s2_height
+            # counts cannot be set as its rasterized!
+            instance_counts = None #gdf['label'].value_counts().to_dict()
+
+            for label in LABELS:
+                count = np.count_nonzero(dst_data == label)
+
+                sats[f'dist_{label}'] = round(count / num_px, 3)
+                sats[f'count_{label}'] = instance_counts
+
+        return dst_data, profile, sats
+
+
 def _process_batch(data: Tuple[int, pd.DataFrame]) -> Tuple[int, bool]:
     index, batch = data
-    try:
+    #try:
+    output_panda = []
+    if True:
         # first item should have same lat/lon as all others
-        lat, lon = batch.iloc[0]['lat'], batch.iloc[0]['lon']
+        lat, lon, id = batch.iloc[0]['lat'], batch.iloc[0]['lon'], batch.iloc[0]['id']
+        new_id = f"{id:05d}"
         # Prepare the raster transform
         geotransform = cubexpress.lonlat2rt(
             lon=lon,
@@ -108,36 +183,86 @@ def _process_batch(data: Tuple[int, pd.DataFrame]) -> Tuple[int, bool]:
             edge_size=128,
             scale=10
         )
+        gt = geotransform.geotransform
+        new_x_scale = gt['scaleX'] / 4
+        new_y_scale = gt['scaleY'] / 4
+
+        s2_hr_trafo = rasterio.transform.Affine(new_x_scale, gt['shearX'], gt['translateX'],
+                                                gt['shearY'], new_y_scale, gt['translateY'])
 
         requests = []
+        ids = []
         for i, row in batch.iterrows():
             # Build a single Request
+            ids.append(row["s2_download_id"])
+            # download only the few relevant bands for matching!
             requests.append(cubexpress.Request(id=row["s2_download_id"],
                                                raster_transform=geotransform,
-                                               bands=[
-                                                   "B1", "B2", "B3", "B4", "B5",
-                                                   "B6", "B7", "B8", "B8A", "B9",
-                                                   "B11", "B12"
-                                               ],
+                                               bands=["B2", "B3", "B4", "B8"],
                                                image=row["s2_full_id"]
                                                ))
+            # requests.append(cubexpress.Request(id=row["s2_download_id"],
+            #                                    raster_transform=geotransform,
+            #                                    bands=[
+            #                                        "B1", "B2", "B3", "B4", "B5",
+            #                                        "B6", "B7", "B8", "B8A", "B9",
+            #                                        "B11", "B12"
+            #                                    ],
+            #                                    image=row["s2_full_id"]
+            #                                    ))
 
         # Create a RequestSet (can hold multiple requests)
         cube_requests = cubexpress.RequestSet(requestset=requests)
 
         # Fetch the data cube
-        cubexpress.getcube(
-            request=cube_requests,
-            output_path=BASE / "output",  # directory for output
-            nworkers=4,  # parallel workers
-            max_deep_level=5  # maximum concurrency with Earth Engine
-        )
+        # cubexpress.getcube(
+        #     request=cube_requests,
+        #     output_path=BASE / "tmp",  # directory for output
+        #     nworkers=4,  # parallel workers
+        #     max_deep_level=5  # maximum concurrency with Earth Engine
+        # )
 
         # load all sentinel images
+        cmb_s2_paths = [Path(BASE / "tmp" / f"{p}.tif") for p in ids]
+        s2_profile, s2_data = load_s2_tiles(path_list=cmb_s2_paths)
 
         # load corresponding orthofoto
+        input_path = BASE / 'local_orthofotos' / 'input' / f'input_{id}.tif'
+        target_path = BASE / 'local_orthofotos' / 'target' / f'target_{id}.tif'
 
-        # resample/crop/transform
+        tinput_path = BASE / 'output' / 'hr_orthofoto'
+        ttarget_path = BASE / 'output' / 'hr_mask'
+
+        # transform and resample the orthofoto images and masks
+        mdata, mprofile, mask_stats = transform_ortho(ortho_fp=target_path,
+                                s2_crs=s2_profile['crs'],
+                                s2_transform=s2_hr_trafo,
+                                s2_width=IMG_SHAPE[0], #s2_profile['width'],
+                                s2_height=IMG_SHAPE[1], #s2_profile['height'],
+                                )
+
+        odata, oprofile, _ = transform_ortho(ortho_fp=input_path,
+                            s2_crs=s2_profile['crs'],
+                            s2_transform=s2_hr_trafo,
+                            s2_width=IMG_SHAPE[0],  # s2_profile['width'],
+                            s2_height=IMG_SHAPE[1],  # s2_profile['height'],
+                            )
+
+        # create boolean mask for filtering and homogenising all image data
+        nodata_mask = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0)
+
+        # apply mask and save to file
+        with rasterio.open(ttarget_path / f'HR_mask_{new_id}.tif', mode='w+', **mprofile) as dst:
+            dst.write(mdata * nodata_mask)
+
+        with rasterio.open(tinput_path / f'HR_ortho_{new_id}.tif', mode='w+', **oprofile) as dst:
+            dst.write(odata * nodata_mask)
+
+        # reapply the newly calculated mask statistics
+        output_panda.append(mask_stats)
+
+        # adjust sentinel 2 images with nodata mask if necessary
+
 
         # histogram matching
 
@@ -145,34 +270,53 @@ def _process_batch(data: Tuple[int, pd.DataFrame]) -> Tuple[int, bool]:
 
         # remove unwanted sentinel images
 
+        # shutil.copy(s2, ts2 / f'S2_{new_id}.tif'
+
         return index, True
-    except Exception as e:
-        # In case of errors, append None
-        print(f'Error: {e}')
-        return index, False
+    # except Exception as e:
+    #     # In case of errors, append None
+    #     print(f'Error: {e}')
+    #     return index, False
 
 
 if __name__ == '__main__':
     add_ = False
     if add_:
-        table: pd.DataFrame = pd.read_csv(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200.csv")
+        table: pd.DataFrame = pd.read_csv(BASE / "sample_s2.csv")
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
-        df_filtered.to_csv(BASE / 'tables' / 'ccs_090_ALL_S2_filter_sample200_withmetadata.csv')
+        df_filtered.to_csv(BASE / "sample_s2_wmeta.csv")
     else:
-        df_filtered: pd.DataFrame = pd.read_csv(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200_withmetadata.csv")
+        #df_filtered: pd.DataFrame = pd.read_csv(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200_withmetadata.csv")
+        df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
+
+    # get statelog
+    statelog: pd.DataFrame = pd.read_csv("C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/statelogs/austria_full_allclasses_regridded/statelog.csv")
+
+    # generate folders
+    out_ortho_input = BASE / 'output' / 'hr_orthofoto'
+    out_ortho_target = BASE / 'output' / 'hr_mask'
+    out_sentinel2 = BASE / 'output' / 'lr_s2'
+
+    out_ortho_input.mkdir(parents=True, exist_ok=True)
+    out_ortho_target.mkdir(parents=True, exist_ok=True)
+    out_sentinel2.mkdir(parents=True, exist_ok=True)
 
     # Download with cubexpress
-    df_batches = df_filtered[:20].groupby("id")
+    df_batches = df_filtered.groupby("id")
 
     print('downloading sentinel2')
     # Create a multiprocessing pool
     rows = [(idx, batch) for idx, batch in df_batches]
 
     #res = [_process_batch(row) for row in rows]
+    res = []
+    for row in rows:
+        res.append(_process_batch(row))
+        break
 
     # Use ProcessPoolExecutor instead of multiprocessing.Pool
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        res = list(tqdm(executor.map(_process_batch, rows), total=len(df_batches)))
+    # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+    #     res = list(tqdm(executor.map(_process_batch, rows), total=len(df_batches)))
 
     for i, b in res:
         if not b:
