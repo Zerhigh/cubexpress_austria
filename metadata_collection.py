@@ -1,6 +1,5 @@
-################################################
-############# Generate S2 metadata #############
-################################################
+import datetime as dt
+
 import ee
 import pandas as pd
 import geopandas as gpd
@@ -12,18 +11,16 @@ from tqdm import tqdm
 import cubexpress
 from multiprocessing import Pool
 from typing import List, Optional
-
-
 from pathlib import Path
 
-# ----------------------------------------------
-# Initialize the Earth Engine API
-# --------------------------------------------------
+
 try:
     ee.Initialize()
 except Exception:
     ee.Authenticate(auth_mode="notebook")
     ee.Initialize()
+
+CDF_TRESHHOLD = 0.9
 
 def query_utm_crs_info(
     lon: float,
@@ -48,6 +45,7 @@ def query_utm_crs_info(
     zone_epsg = f"326{zone_number:02d}" if lat >= 0 else f"327{zone_number:02d}"
     return x, y, f"EPSG:{zone_epsg}"
 
+
 def image_to_feature(img: ee.Image) -> ee.Feature:
     """
     Convert an Earth Engine Image footprint (system:footprint) into a Feature
@@ -64,26 +62,19 @@ def image_to_feature(img: ee.Image) -> ee.Feature:
     poly = ee.Geometry.Polygon([ring.coordinates()])
     return ee.Feature(poly, img.toDictionary())
 
-# --------------------------------------------------
-# Load and preprocess input points
-# --------------------------------------------------
 
-#BASE = Path('drive/MyDrive/Colab Notebooks/')
-BASE = Path('')
+def calculate_timeframe(start: str, stop: str, min_days: int = 100) -> Tuple[str, str]:
+    dt_start, dt_stop = dt.datetime.strptime(start, '%Y-%m-%d'), dt.datetime.strptime(stop, '%Y-%m-%d')
+    to_time_diff = dt.timedelta(days=min_days)
 
-sampling_path: Path = Path("C:/Users/shollend/data/metadata")
-CDF_TRESHHOLD = 0.85
+    if dt_stop - dt_start < to_time_diff:
+        mean_day = dt_start + (dt_stop - dt_start) / 2
+        start_ = mean_day - to_time_diff / 2
+        stop_ = mean_day + to_time_diff / 2
+        return start_.strftime('%Y-%m-%d'), stop_.strftime('%Y-%m-%d')
+    else:
+        return start, stop
 
-points: gpd.GeoDataFrame = gpd.read_file(sampling_path / "ALL_S2_points_regular_grid_s2download.gpkg")
-
-# Define date ranges around the 'Date' column
-points["start_date"] = points["beginLifeS"].dt.strftime('%Y-%m-%d')
-points["end_date"] = points["endLifeSpa"].dt.strftime('%Y-%m-%d')
-points["base_date"] = points["Date"].dt.strftime('%Y-%m-%d')
-
-# --------------------------------------------------
-# Main loop: process each point to filter S2 (Sentinel-2) images
-# --------------------------------------------------
 
 def _parallel(row: pd.Series) -> Tuple[str, pd.DataFrame | None]:
     # Derive UTM CRS based on point location
@@ -92,10 +83,12 @@ def _parallel(row: pd.Series) -> Tuple[str, pd.DataFrame | None]:
     # Create an Earth Engine point geometry
     center: ee.Geometry = ee.Geometry.Point([row.lon, row.lat])
 
+    start, stop = calculate_timeframe(row["start_date"], row["end_date"])
+
     # Create an ImageCollection filtered by date, bounding area, and band
     ic: ee.ImageCollection = (
         ee.ImageCollection("GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED")
-        .filterDate(row["start_date"], row["end_date"])
+        .filterDate(start, stop)
         .filterBounds(center)
         .select("cs_cdf")
     )
@@ -176,21 +169,14 @@ def _parallel(row: pd.Series) -> Tuple[str, pd.DataFrame | None]:
             # Collect the results in a list
             return (row['id'], df_final)
 
-        # if i % 10000 == 0 and i != 0:
-        #     geo_dataframe_temp = gpd.GeoDataFrame(pd.concat(dfs_list, ignore_index=True), crs="EPSG:4326")
-        #
-        #     # Save as a GeoPackage (vector file) and CSV
-        #     geo_dataframe_temp.to_file(BASE / f"tables/stratified_ALL_S2_points_wdate_filter_{i}.gpkg", driver="GPKG")
-        #     geo_dataframe_temp.drop(columns=["geometry"]).to_csv(BASE / f"tables/stratified_ALL_S2_points_wdate_filter_{i}.csv",
-        #                                                     index=False)
-
     except Exception as e:
         # In case of errors, append None
+        print(f'Error: {e}')
         return (row['id'], None)
 
 
-def parallel() -> list:
-    rows = [row for _, row in points.iterrows()]
+def parallel(df: pd.DataFrame) -> list:
+    rows = [row for _, row in df.iterrows()]
 
     with Pool(processes=os.cpu_count()) as pool:
         results = list(tqdm(pool.imap_unordered(_parallel, rows), total=len(rows), desc="Processing"))
@@ -198,18 +184,31 @@ def parallel() -> list:
     return results
 
 
-def sequential() -> list:
+def sequential(df: pd.DataFrame) -> list:
     results = []
-    for _, row in tqdm(points.iterrows()):
+    for _, row in tqdm(df.iterrows()):
         results.append(_parallel(row))
 
     return results
 
 
 if __name__ == '__main__':
+    BASE = Path('')
+
+    #sampling_path: Path = Path("C:/Users/shollend/data/metadata")
+    sampling_path: Path = Path("C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/sampling")
+    points: gpd.GeoDataFrame = gpd.read_file(sampling_path / "ALL_S2_points_regular_grid_s2download.gpkg")
+
+    # Define date ranges around the 'Date' column
+    points["start_date"] = points["beginLifeS"].dt.strftime('%Y-%m-%d')
+    points["end_date"] = points["endLifeSpa"].dt.strftime('%Y-%m-%d')
+    points["base_date"] = points["Date"].dt.strftime('%Y-%m-%d')
+
+    sample = points.sample(n=1000)
+
     print('start')
     start = time.time()
-    result = parallel()
+    result = parallel(df=sample)
     print(f'took: {round(time.time()-start, 2)}s')
 
     not_found = []
@@ -229,5 +228,6 @@ if __name__ == '__main__':
     geo_dataframe = gpd.GeoDataFrame(pd.concat(dfs_list, ignore_index=True), crs="EPSG:4326")
 
     # Save as a GeoPackage (vector file) and CSV
-    geo_dataframe.to_file(BASE / "tables" / "ALL_S2_filter.gpkg", driver="GPKG")
-    geo_dataframe.drop(columns=["geometry"]).to_csv(BASE / "tables" / "ALL_S2_filter.csv", index=False)
+    geo_dataframe.to_file(BASE / "tables" / "ALL_S2_filter_sample1000.gpkg", driver="GPKG")
+    sample.to_file(BASE / "tables" / "BASE_S2_filter_sample1000.gpkg", driver="GPKG")
+    #geo_dataframe.drop(columns=["geometry"]).to_csv(BASE / "tables" / "ALL_S2_filter.csv", index=False)
