@@ -154,7 +154,7 @@ def _parallel(row: pd.Series) -> Tuple[str, pd.DataFrame | None]:
 
         # Discard empty or insufficient results
         if df.empty:
-            return (row['id'], None)
+            return row['id'], None
         else:
 
             # Sort by the absolute difference in days and cloud score
@@ -164,15 +164,15 @@ def _parallel(row: pd.Series) -> Tuple[str, pd.DataFrame | None]:
             df_final = df_final.iloc[:8]
 
             # Append the relevant row attributes (skipping first two and last three columns)
-            df_final = df_final.assign(**row[2:-3])
+            df_final = df_final.assign(**row[2:])
 
             # Collect the results in a list
-            return (row['id'], df_final)
+            return row['id'], df_final
 
     except Exception as e:
         # In case of errors, append None
         print(f'Error: {e}')
-        return (row['id'], None)
+        return row['id'], None
 
 
 def parallel(df: pd.DataFrame) -> list:
