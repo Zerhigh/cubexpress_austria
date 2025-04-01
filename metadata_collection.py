@@ -204,30 +204,33 @@ if __name__ == '__main__':
     points["end_date"] = points["endLifeSpa"].dt.strftime('%Y-%m-%d')
     points["base_date"] = points["Date"].dt.strftime('%Y-%m-%d')
 
-    sample = points.sample(n=1000)
+    #sample = points.sample(n=200)
 
     print('start')
     start = time.time()
-    result = parallel(df=sample)
+    result = parallel(df=points)
     print(f'took: {round(time.time()-start, 2)}s')
 
-    not_found = []
+    # Prepare a list to hold all filtered results
+    dfs_list: List[Optional[pd.DataFrame]] = []
+    id_list_none: List[str] = []
+
     for i, val in result:
         if val is None:
-            not_found.append(i)
-            print(f'no thing found for {i}')
+            id_list_none.append(i)
+        else:
+            dfs_list.append(val)
 
-    print(len(not_found), not_found)
-
-    # Prepare a list to hold all filtered results
-    dfs_list: List[Optional[pd.DataFrame]] = [val for i, val in result]
     if len(dfs_list) < 1:
         raise TypeError("error, nothing found")
+    elif len(id_list_none) > 1:
+        print(f'Didnt find anything ({len(id_list_none)}) for {id_list_none}')
 
     # Combine all dataframes into a single GeoDataFrame
     geo_dataframe = gpd.GeoDataFrame(pd.concat(dfs_list, ignore_index=True), crs="EPSG:4326")
+    filtered_sample = points[points['id'].isin(id_list_none)]
 
     # Save as a GeoPackage (vector file) and CSV
-    geo_dataframe.to_file(BASE / "tables" / "ALL_S2_filter_sample1000.gpkg", driver="GPKG")
-    sample.to_file(BASE / "tables" / "BASE_S2_filter_sample1000.gpkg", driver="GPKG")
+    geo_dataframe.to_file(BASE / "tables" / "ccs_090_ALL_S2_filter.gpkg", driver="GPKG")
+    filtered_sample.to_file(BASE / "tables" / "NOT_090_FOUND_S2_filter.gpkg", driver="GPKG")
     #geo_dataframe.drop(columns=["geometry"]).to_csv(BASE / "tables" / "ALL_S2_filter.csv", index=False)
