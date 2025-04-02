@@ -3,7 +3,7 @@ import time
 import ee
 import numpy as np
 import pandas as pd
-from osgeo import gdal  # Import gdal before rasterio
+#from osgeo import gdal  # Import gdal before rasterio
 import geopandas as gpd
 import json
 from typing import Tuple, List, Optional, Any, Dict, Hashable
@@ -34,12 +34,13 @@ from scipy.ndimage import zoom
 # Initialize the Earth Engine API
 # --------------------------------------------------
 try:
-    ee.Initialize()
+    ee.Initialize(project='ee-samuelsuperresolution')
 except Exception:
     ee.Authenticate(auth_mode="notebook")
-    ee.Initialize()
+    ee.Initialize(project='ee-samuelsuperresolution')
 
-BASE = Path('local_experiment')
+BASE = Path('/data/USERS/shollend/combined_download/')
+#BASE = Path('/home/shollend/Desktop/combined_download')
 LABELS = (0, 40, 41, 42, 48, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 72, 83, 84, 87, 88, 92, 95, 96)
 IMG_SHAPE = [512, 512]
 UPSAMPLE = 4
@@ -225,8 +226,13 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         )
 
         # load corresponding orthofoto
-        input_path = BASE / 'local_orthofotos' / 'input' / f'input_{id}.tif'
-        target_path = BASE / 'local_orthofotos' / 'target' / f'target_{id}.tif'
+        # /data/USERS/shollend/orthophoto/austria_full_allclasses_regridded
+        ortho_base = Path('/data/USERS/shollend/orthophoto/austria_full_allclasses_regridded')
+        input_path = ortho_base / 'input' / f'input_{id}.tif'
+        target_path = ortho_base / 'target' / f'target_{id}.tif'
+
+        # input_path = BASE / 'local_orthofotos' / 'input' / f'input_{id}.tif'
+        # target_path = BASE / 'local_orthofotos' / 'target' / f'target_{id}.tif'
 
         # transform and resample the orthofoto images and masks
         mdata, mprofile = transform_ortho(ortho_fp=target_path,
@@ -394,11 +400,11 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
 
 if __name__ == '__main__':
-    add_ = False
+    add_ = True
     if add_:
-        table: pd.DataFrame = pd.read_csv(BASE / "sample_s2.csv")
+        table: pd.DataFrame = pd.read_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv')
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
-        df_filtered.to_csv(BASE / "sample_s2_wmeta.csv")
+        df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv')
     else:
         # df_filtered: pd.DataFrame = pd.read_csv(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200_withmetadata.csv")
         df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
@@ -406,6 +412,13 @@ if __name__ == '__main__':
     # get statelog
     # statelog: pd.DataFrame = pd.read_csv(
     #     "C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/statelogs/austria_full_allclasses_regridded/statelog.csv")
+
+    # ortho path
+    # /data/USERS/shollend/orthophoto/austria_full_allclasses_regridded
+    # table path
+    # /home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv
+    # base
+    # /data/USERS/shollend/combined_download
 
     # generate folders
     out_ortho_target = BASE / 'output' / 'hr_mask'
