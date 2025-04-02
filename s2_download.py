@@ -13,9 +13,9 @@ import shutil
 from tqdm import tqdm
 import cubexpress
 from typing import List, Optional
-from utils_histogram import *
+import utils_histogram
 
-#from skimage.exposure import match_histograms
+import skimage
 
 from rasterio.warp import reproject, Resampling
 from shapely.geometry import box
@@ -253,10 +253,10 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
         # Degrade HR to LR using bilinear interpolation AND normalize (order=1 → Bilinear interpolation)
 
-        #lr_nodata_mask = zoom(nodata_mask, (DOWNSAMPLE, DOWNSAMPLE), order=1)
-        #lr_nodata_mask = resize(nodata_mask, (128, 128), anti_aliasing=False)
-        #lr_ortho = resize(masked_odata / 255, (4, 128, 128), anti_aliasing=False)
-        #hr_ortho = masked_odata / 255
+        lr_nodata_mask = resize(nodata_mask, (128, 128), anti_aliasing=False)
+        hr_ortho_norm = masked_odata / 255
+        #hr_ortho_norm = resize(masked_odata / 255, (4, 128, 128), anti_aliasing=False)
+
         #lr_ortho = resize(masked_odata / 255, (4, 128, 128), anti_aliasing=False)
         #lr_ortho = zoom(masked_odata / 255, (1, DOWNSAMPLE, DOWNSAMPLE), order=1)
         #lr_ortho = zoom(masked_odata / 255, (1, 0.25, 0.25), order=1)
@@ -270,31 +270,28 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7]
             lr_s2 = (s2_image[[3, 2, 1, 7], :, :] * lr_nodata_mask) / 10_000
 
-            # histogram matching
-            #hr_harm_own = match_histograms(image=hr_ortho, reference=lr_s2, channel_axis=0, ignore_none=True, none_value=normalized_nodata_value)
-            lr_harm = match_histograms(image=lr_ortho, reference=lr_s2, channel_axis=0)
+            # histogram matching -> output 4, 512, 512
+            hr_harm_self = utils_histogram.match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0, ignore_none=True, none_value=normalized_nodata_value)
 
-            kernel_size = 32
-            corr = fast_block_correlation(lr_s2, lr_harm, block_size=kernel_size)
-
-            with rasterio.open("hr_test_own.tif", mode='w+', **oprofile) as dst:
-                dst.write((hr_harm_own * 10_000).round().astype(rasterio.uint16))
-            with rasterio.open("hr_test_base.tif", mode='w+', **oprofile) as dst:
-                dst.write((hr_harm_ref * 10_000).round().astype(rasterio.uint16))
-
-            # reduce with bilinear interpolation
-            #lr_harm = zoom(hr_harm, (1, DOWNSAMPLE, DOWNSAMPLE), order=1)
-            lr_harm = resize(hr_harm, (4, 128, 128), anti_aliasing=False)
+            # reduce with bilinear interpolation -> output 4, 128, 128
+            lr_harm_self = resize(hr_harm_self, (4, 128, 128), anti_aliasing=False)
 
             # Compute block-wise correlation between LR and LRharm
             kernel_size = 32
-            corr = fast_block_correlation(lr_s2, lr_harm, block_size=kernel_size)
+            corr_self = utils_histogram.fast_block_correlation(lr_s2, lr_harm_self, block_size=kernel_size)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
-            low_cor = np.nanquantile(corr, 0.10)
-            s2_corrs[s2_name] = low_cor
-            lr_harms[s2_name] = lr_harm
-            hr_harms[s2_name] = hr_harm
+            low_cor_self = np.nanquantile(corr_self, 0.10)
+
+            s2_corrs[s2_name] = low_cor_self
+            lr_harms[s2_name] = lr_harm_self
+            hr_harms[s2_name] = hr_harm_self
+
+            # test with official changed method (including no data)
+            # hr_harm = utils_histogram.real_match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0)
+            # lr_harm = resize(hr_harm, (4, 128, 128), anti_aliasing=False)
+            # corr = utils_histogram.fast_block_correlation(lr_s2, lr_harm, block_size=kernel_size)
+            # low_cor = np.nanquantile(corr, 0.10)
 
         # Best fitting sentinel2 sample for the current orthophoto
         best_s2_key = max(s2_corrs, key=s2_corrs.get)

@@ -51,8 +51,8 @@ def _match_cumulative_cdf(source, template, ignore_none=False, none_value=0):
     its values matches the cumulative density function of the template.
     """
     # remove nones
-    # s2nans = np.count_nonzero(template == 0)
-    # hrnans = np.count_nonzero(source == 0)
+    s2nans = np.count_nonzero(template == 0)
+    hrnans = np.count_nonzero(source == 0)
 
     src_size, tmpl_size = source.size, template.size
 
@@ -81,7 +81,8 @@ def _match_cumulative_cdf(source, template, ignore_none=False, none_value=0):
 
                 # reduce amount of nans in the template (s2) by the amount of nans in the masked HR Orthofoto
                 # this maintains the naTural s2 nones while Removing the impact of those introduced by the binary masking
-                tmpl_counts[tmpl_nan_index] -= src_counts[src_nan_index]
+                #nan_count = int(src_counts[src_nan_index][0] / 16)
+                tmpl_counts[tmpl_nan_index] = 0
 
                 # set thE number of nans in the Orthofoto to 0, this will 'neglect' natural nans in the orthofoto, but
                 # these are already mapped onto the s2 so their impact is also reduced from the s2
@@ -96,6 +97,35 @@ def _match_cumulative_cdf(source, template, ignore_none=False, none_value=0):
 
     interp_a_values = np.interp(src_quantiles, tmpl_quantiles, tmpl_values)
     return interp_a_values[src_lookup].reshape(source.shape)
+
+
+def real_match_cumulative_cdf(source, template):
+    """
+    Return modified source array so that the cumulative density function of
+    its values matches the cumulative density function of the template.
+    """
+    if source.dtype.kind == 'u':
+        src_lookup = source.reshape(-1)
+        src_counts = np.bincount(src_lookup)
+        tmpl_counts = np.bincount(template.reshape(-1))
+
+        # omit values where the count was 0
+        tmpl_values = np.nonzero(tmpl_counts)[0]
+        tmpl_counts = tmpl_counts[tmpl_values]
+    else:
+        src_values, src_lookup, src_counts = np.unique(
+            source.reshape(-1), return_inverse=True, return_counts=True
+        )
+        tmpl_values, tmpl_counts = np.unique(template.reshape(-1), return_counts=True)
+
+    # calculate normalized quantiles for each array
+    src_quantiles = np.cumsum(src_counts) / source.size
+    tmpl_quantiles = np.cumsum(tmpl_counts) / template.size
+
+    interp_a_values = np.interp(src_quantiles, tmpl_quantiles, tmpl_values)
+    return interp_a_values[src_lookup].reshape(source.shape)
+
+
 
 
 def match_histograms(image, reference, *, channel_axis=None, ignore_none=False, none_value=0):
@@ -148,8 +178,6 @@ def match_histograms(image, reference, *, channel_axis=None, ignore_none=False, 
 
         matched = np.empty(image.shape, dtype=image.dtype)
         for channel in range(image.shape[0]):
-            #t = matched[channel]
-
             matched_channel = _match_cumulative_cdf(
                 image[channel], reference[channel], ignore_none=ignore_none, none_value=none_value
             )
@@ -164,6 +192,70 @@ def match_histograms(image, reference, *, channel_axis=None, ignore_none=False, 
         matched = matched.astype(out_dtype, copy=False)
     return matched
 
+
+def real_match_histograms(image, reference, *, channel_axis=None):
+    """Adjust an image so that its cumulative histogram matches that of another.
+
+    The adjustment is applied separately for each channel.
+
+    Parameters
+    ----------
+    image : ndarray
+        Input image. Can be gray-scale or in color.
+    reference : ndarray
+        Image to match histogram of. Must have the same number of channels as
+        image.
+    channel_axis : int or None, optional
+        If None, the image is assumed to be a grayscale (single channel) image.
+        Otherwise, this parameter indicates which axis of the array corresponds
+        to channels.
+
+    Returns
+    -------
+    matched : ndarray
+        Transformed input image.
+
+    Raises
+    ------
+    ValueError
+        Thrown when the number of channels in the input image and the reference
+        differ.
+
+    References
+    ----------
+    .. [1] http://paulbourke.net/miscellaneous/equalisation/
+
+    """
+
+    # modified to work with channel x width x heigth
+
+    if image.ndim != reference.ndim:
+        raise ValueError(
+            'Image and reference must have the same number ' 'of channels.'
+        )
+
+    if channel_axis is not None:
+        if image.shape[0] != reference.shape[0]:
+            raise ValueError(
+                'Number of channels in the input image and '
+                'reference image must match!'
+            )
+
+        matched = np.empty(image.shape, dtype=image.dtype)
+        for channel in range(image.shape[0]):
+            matched_channel = real_match_cumulative_cdf(
+                image[channel], reference[channel]
+            )
+            matched[channel] = matched_channel
+    else:
+        # _match_cumulative_cdf will always return float64 due to np.interp
+        matched = real_match_cumulative_cdf(image, reference)
+
+    if matched.dtype.kind == 'f':
+        # output a float32 result when the input is float16 or float32
+        out_dtype = _supported_float_type(image.dtype)
+        matched = matched.astype(out_dtype, copy=False)
+    return matched
 
 
 def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, block_size: int = 16) -> np.ndarray:
