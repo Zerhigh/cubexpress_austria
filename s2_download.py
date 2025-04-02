@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from osgeo import gdal  # Import gdal before rasterio
 import geopandas as gpd
+import json
 from typing import Tuple, List, Optional, Any, Dict, Hashable
 import rasterio
 from skimage.transform import resize
@@ -187,7 +188,8 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                    hr_orthofoto_path: Path,
                    hr_harm_path: Path,
                    lr_s2_path: Path,
-                   lr_harm_path: Path) -> Dict:
+                   lr_harm_path: Path,
+                   logs: Path) -> Dict:
 
     index, batch = data
     batch_statistics = {}
@@ -208,7 +210,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel images into memory (for all bands)
-        download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        #download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
         s2_profile, s2_data = load_sentinel2_samples(path_list=batch_s2_paths)
         s2_profile.update(
@@ -289,10 +291,13 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             hr_harms[s2_name] = hr_harm_self
 
             # test with official changed method (including no data)
+            # # hr_ortho_norm_ = np.where(hr_ortho_norm == 0, np.nan, hr_ortho_norm)
+            # # lr_s2_ = np.where(lr_s2 == 0, np.nan, lr_s2)
             # hr_harm = utils_histogram.real_match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0)
             # lr_harm = resize(hr_harm, (4, 128, 128), anti_aliasing=False)
             # corr = utils_histogram.fast_block_correlation(lr_s2, lr_harm, block_size=kernel_size)
-            # low_cor = np.nanquantile(corr, 0.10)
+            # low_cor_ = np.nanquantile(corr, 0.10)
+            # pass
 
         # Best fitting sentinel2 sample for the current orthophoto
         best_s2_key = max(s2_corrs, key=s2_corrs.get)
@@ -376,11 +381,19 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             file.unlink()
 
         batch_statistics['s2_available'] = True
+        if np.any(nodata_mask == False):
+            batch_statistics['contains_nodata'] = True
+        else:
+            batch_statistics['contains_nodata'] = False
 
+        with open(logs / f"log_{index}.json", "w") as f:
+            json.dump(batch_statistics, f)
         return batch_statistics
     except Exception as e:
         # In case of errors, append None
         print(f'Error at panda index {index}: {e}')
+        with open(logs / f"log_{index}.json", "w") as f:
+            json.dump(batch_statistics, f)
         return batch_statistics
 
 
@@ -395,8 +408,8 @@ if __name__ == '__main__':
         df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
 
     # get statelog
-    statelog: pd.DataFrame = pd.read_csv(
-        "C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/statelogs/austria_full_allclasses_regridded/statelog.csv")
+    # statelog: pd.DataFrame = pd.read_csv(
+    #     "C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/statelogs/austria_full_allclasses_regridded/statelog.csv")
 
     # generate folders
     out_ortho_target = BASE / 'output' / 'hr_mask'
@@ -405,6 +418,7 @@ if __name__ == '__main__':
     out_sentinel2 = BASE / 'output' / 'lr_s2'
     out_sentinel2_harm = BASE / 'output' / 'lr_harm_s2'
     tmp = BASE / 'tmp'
+    logs = BASE / 'logs'
 
     out_ortho_input.mkdir(parents=True, exist_ok=True)
     out_ortho_target.mkdir(parents=True, exist_ok=True)
@@ -412,6 +426,7 @@ if __name__ == '__main__':
     out_ortho_input_harm.mkdir(parents=True, exist_ok=True)
     out_sentinel2_harm.mkdir(parents=True, exist_ok=True)
     tmp.mkdir(parents=True, exist_ok=True)
+    logs.mkdir(parents=True, exist_ok=True)
 
     # Download with cubexpress
     df_batches = df_filtered.groupby("id")
@@ -420,24 +435,26 @@ if __name__ == '__main__':
     # Create a multiprocessing pool
     rows = [(idx, batch) for idx, batch in df_batches]
 
-    # res = [_process_batch(row) for row in rows]
-    # res = []
-    # for row in rows[:3]:
-    #     res.append(_process_batch(data=row,
-    #                               hr_compressed_mask_path=out_ortho_target,
-    #                               hr_orthofoto_path=out_ortho_input,
-    #                               hr_harm_path=out_ortho_input_harm,
-    #                               lr_s2_path=out_sentinel2,
-    #                               lr_harm_path=out_sentinel2_harm
-    #                               ))
+    res = []
+    for row in rows[:3]:
+        res.append(_process_batch(data=row,
+                                  hr_compressed_mask_path=out_ortho_target,
+                                  hr_orthofoto_path=out_ortho_input,
+                                  hr_harm_path=out_ortho_input_harm,
+                                  lr_s2_path=out_sentinel2,
+                                  lr_harm_path=out_sentinel2_harm,
+                                  logs=logs,
+                                  ))
 
     _process_batch_partial = partial(_process_batch,
                                      hr_compressed_mask_path=out_ortho_target,
                                      hr_orthofoto_path=out_ortho_input,
                                      hr_harm_path=out_ortho_input_harm,
                                      lr_s2_path=out_sentinel2,
-                                     lr_harm_path=out_sentinel2_harm)
+                                     lr_harm_path=out_sentinel2_harm,
+                                     logs=logs,)
 
+    rows = rows[:3]
     # Run parallel processing
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))

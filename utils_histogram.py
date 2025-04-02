@@ -126,8 +126,6 @@ def real_match_cumulative_cdf(source, template):
     return interp_a_values[src_lookup].reshape(source.shape)
 
 
-
-
 def match_histograms(image, reference, *, channel_axis=None, ignore_none=False, none_value=0):
     """Adjust an image so that its cumulative histogram matches that of another.
 
