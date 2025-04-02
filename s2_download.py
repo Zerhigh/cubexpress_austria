@@ -14,6 +14,7 @@ from tqdm import tqdm
 import cubexpress
 from typing import List, Optional
 import utils_histogram
+from functools import partial
 
 import skimage
 
@@ -186,12 +187,11 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                    hr_orthofoto_path: Path,
                    hr_harm_path: Path,
                    lr_s2_path: Path,
-                   lr_harm_path: Path) -> Tuple[int, bool]:
+                   lr_harm_path: Path) -> Dict:
 
     index, batch = data
     batch_statistics = {}
-    #try:
-    if True:
+    try:
         # first item should have same lat/lon as all others
         lat, lon, id = batch.iloc[0]['lat'], batch.iloc[0]['lon'], batch.iloc[0]['id']
         new_id = f"{id:05d}"
@@ -208,7 +208,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel images into memory (for all bands)
-        #download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
         s2_profile, s2_data = load_sentinel2_samples(path_list=batch_s2_paths)
         s2_profile.update(
@@ -278,12 +278,13 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
             # Compute block-wise correlation between LR and LRharm
             kernel_size = 32
-            corr_self = utils_histogram.fast_block_correlation(lr_s2, lr_harm_self, block_size=kernel_size)
+            #corr_self = utils_histogram.fast_block_correlation(lr_s2, lr_harm_self, block_size=kernel_size, none_value=normalized_nodata_value)
+            corr_self = utils_histogram.own_bandwise_correlation(lr_s2, lr_harm_self, none_value=normalized_nodata_value)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
             low_cor_self = np.nanquantile(corr_self, 0.10)
 
-            s2_corrs[s2_name] = low_cor_self
+            s2_corrs[s2_name] = round(low_cor_self, 4)
             lr_harms[s2_name] = lr_harm_self
             hr_harms[s2_name] = hr_harm_self
 
@@ -306,6 +307,11 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         batch_statistics['low_corr'] = s2_corrs[best_s2_key]
 
         ########### WRITE FILES ###########
+        batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
+        batch_statistics['hr_othofoto_path'] = hr_orthofoto_path / f'HR_ortho_{new_id}.tif'
+        batch_statistics['hr_harm_path'] = hr_harm_path / f'HR_ortho_{new_id}.tif'
+        batch_statistics['lr_s2_path'] = lr_s2_path / f'S2_{new_id}.tif'
+        batch_statistics['lr_harm_path'] = lr_harm_path / f'S2_{new_id}.tif'
 
         # Compressed HR-Mask
         mprofile.update(
@@ -369,11 +375,13 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             file = Path(BASE / "tmp" / f"{row['s2_download_id']}.tif")
             file.unlink()
 
-        return index, True
-    # except Exception as e:
-    #     # In case of errors, append None
-    #     print(f'Error: {e}')
-    #     return index, False
+        batch_statistics['s2_available'] = True
+
+        return batch_statistics
+    except Exception as e:
+        # In case of errors, append None
+        print(f'Error at panda index {index}: {e}')
+        return batch_statistics
 
 
 if __name__ == '__main__':
@@ -413,21 +421,30 @@ if __name__ == '__main__':
     rows = [(idx, batch) for idx, batch in df_batches]
 
     # res = [_process_batch(row) for row in rows]
-    res = []
-    for row in rows:
-        res.append(_process_batch(data=row,
-                                  hr_compressed_mask_path=out_ortho_target,
-                                  hr_orthofoto_path=out_ortho_input,
-                                  hr_harm_path=out_ortho_input_harm,
-                                  lr_s2_path=out_sentinel2,
-                                  lr_harm_path=out_sentinel2_harm
-                                  ))
-        break
+    # res = []
+    # for row in rows[:3]:
+    #     res.append(_process_batch(data=row,
+    #                               hr_compressed_mask_path=out_ortho_target,
+    #                               hr_orthofoto_path=out_ortho_input,
+    #                               hr_harm_path=out_ortho_input_harm,
+    #                               lr_s2_path=out_sentinel2,
+    #                               lr_harm_path=out_sentinel2_harm
+    #                               ))
 
-    # Use ProcessPoolExecutor instead of multiprocessing.Pool
-    # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-    #     res = list(tqdm(executor.map(_process_batch, rows), total=len(df_batches)))
+    _process_batch_partial = partial(_process_batch,
+                                     hr_compressed_mask_path=out_ortho_target,
+                                     hr_orthofoto_path=out_ortho_input,
+                                     hr_harm_path=out_ortho_input_harm,
+                                     lr_s2_path=out_sentinel2,
+                                     lr_harm_path=out_sentinel2_harm)
 
-    for i, b in res:
+    # Run parallel processing
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        res = list(tqdm(executor.map(_process_batch_partial, rows[:3]), total=len(rows)))
+
+    out_df = pd.DataFrame.from_records(res)
+    out_df.to_csv(BASE / 'test_process.csv')
+
+    for i, b in enumerate(res):
         if not b:
             print(f'Failed to process batch index/id: {i}')

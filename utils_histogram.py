@@ -258,7 +258,7 @@ def real_match_histograms(image, reference, *, channel_axis=None):
     return matched
 
 
-def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, block_size: int = 16) -> np.ndarray:
+def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, none_value: float = 0, block_size: int = 16) -> np.ndarray:
     """
     Compute the Pearson correlation coefficient for non-overlapping blocks of two images.
     
@@ -310,3 +310,38 @@ def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, block_size: int =
             block_correlations[i, j] = np.corrcoef(block1.ravel(), block2.ravel())[0, 1]
     
     return block_correlations
+
+
+def own_bandwise_correlation(img1, img2, none_value=0):
+    """
+    Compute Pearson correlation per band between two multi-band images,
+    while handling no-data values.
+
+    Args:
+        img1, img2 (np.ndarray): Arrays of shape (bands, height, width).
+        nodata_value (int or float): No-data value to be ignored.
+
+    Returns:
+        np.ndarray: Correlation coefficient for each band.
+    """
+    assert img1.shape == img2.shape, "Input images must have the same shape"
+
+    bands, height, width = img1.shape
+    correlations = np.full(bands, np.nan)  # Initialize with NaN
+
+    for b in range(bands):
+        band1 = img1[b].ravel()
+        band2 = img2[b].ravel()
+
+        # Mask no-data values (convert them to NaN)
+        valid_mask = (band1 != none_value) & (band2 != none_value)
+        valid_band1 = band1[valid_mask]
+        valid_band2 = band2[valid_mask]
+
+        # If no valid data left, return NaN
+        if valid_band1.size == 0 or valid_band2.size == 0:
+            correlations[b] = np.nan
+        else:
+            correlations[b] = np.corrcoef(valid_band1, valid_band2)[0, 1]
+
+    return correlations
