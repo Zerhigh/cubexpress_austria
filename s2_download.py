@@ -440,7 +440,7 @@ if __name__ == '__main__':
 
     # Run parallel processing
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        res = list(tqdm(executor.map(_process_batch_partial, rows[:3]), total=len(rows)))
+        res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))
 
     out_df = pd.DataFrame.from_records(res)
     out_df.to_csv(BASE / 'test_process.csv')
