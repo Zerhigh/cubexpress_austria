@@ -293,7 +293,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             # Report the 10th percentile of the correlation (low correlation) without nans
             low_cor_self = np.nanquantile(corr_self, 0.10)
 
-            s2_corrs[s2_name] = round(low_cor_self, 4)
+            s2_corrs[s2_name] = round(float(low_cor_self), 4)
             lr_harms[s2_name] = lr_harm_self
             hr_harms[s2_name] = hr_harm_self
 
@@ -317,6 +317,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                 batch_statistics[k] = v
 
         batch_statistics['low_corr'] = s2_corrs[best_s2_key]
+        batch_statistics['all_corrs'] = s2_corrs
 
         ########### WRITE FILES ###########
         batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
