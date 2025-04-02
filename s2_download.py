@@ -1,3 +1,5 @@
+import time
+
 import ee
 import numpy as np
 import pandas as pd
@@ -188,8 +190,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                    hr_orthofoto_path: Path,
                    hr_harm_path: Path,
                    lr_s2_path: Path,
-                   lr_harm_path: Path,
-                   logs: Path) -> Dict:
+                   lr_harm_path: Path,) -> Dict:
 
     index, batch = data
     batch_statistics = {}
@@ -210,7 +211,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel images into memory (for all bands)
-        #download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
         s2_profile, s2_data = load_sentinel2_samples(path_list=batch_s2_paths)
         s2_profile.update(
@@ -385,15 +386,10 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             batch_statistics['contains_nodata'] = True
         else:
             batch_statistics['contains_nodata'] = False
-
-        with open(logs / f"log_{index}.json", "w") as f:
-            json.dump(batch_statistics, f)
         return batch_statistics
     except Exception as e:
         # In case of errors, append None
         print(f'Error at panda index {index}: {e}')
-        with open(logs / f"log_{index}.json", "w") as f:
-            json.dump(batch_statistics, f)
         return batch_statistics
 
 
@@ -418,7 +414,6 @@ if __name__ == '__main__':
     out_sentinel2 = BASE / 'output' / 'lr_s2'
     out_sentinel2_harm = BASE / 'output' / 'lr_harm_s2'
     tmp = BASE / 'tmp'
-    logs = BASE / 'logs'
 
     out_ortho_input.mkdir(parents=True, exist_ok=True)
     out_ortho_target.mkdir(parents=True, exist_ok=True)
@@ -426,41 +421,41 @@ if __name__ == '__main__':
     out_ortho_input_harm.mkdir(parents=True, exist_ok=True)
     out_sentinel2_harm.mkdir(parents=True, exist_ok=True)
     tmp.mkdir(parents=True, exist_ok=True)
-    logs.mkdir(parents=True, exist_ok=True)
 
     # Download with cubexpress
     df_batches = df_filtered.groupby("id")
 
     print('downloading sentinel2')
+    tstart = time.time()
     # Create a multiprocessing pool
     rows = [(idx, batch) for idx, batch in df_batches]
 
-    res = []
-    for row in rows[:3]:
-        res.append(_process_batch(data=row,
-                                  hr_compressed_mask_path=out_ortho_target,
-                                  hr_orthofoto_path=out_ortho_input,
-                                  hr_harm_path=out_ortho_input_harm,
-                                  lr_s2_path=out_sentinel2,
-                                  lr_harm_path=out_sentinel2_harm,
-                                  logs=logs,
-                                  ))
+    # res = []
+    # for row in tqdm(rows[:3]):
+    #     res.append(_process_batch(data=row,
+    #                               hr_compressed_mask_path=out_ortho_target,
+    #                               hr_orthofoto_path=out_ortho_input,
+    #                               hr_harm_path=out_ortho_input_harm,
+    #                               lr_s2_path=out_sentinel2,
+    #                               lr_harm_path=out_sentinel2_harm,
+    #                               ))
 
     _process_batch_partial = partial(_process_batch,
                                      hr_compressed_mask_path=out_ortho_target,
                                      hr_orthofoto_path=out_ortho_input,
                                      hr_harm_path=out_ortho_input_harm,
                                      lr_s2_path=out_sentinel2,
-                                     lr_harm_path=out_sentinel2_harm,
-                                     logs=logs,)
+                                     lr_harm_path=out_sentinel2_harm,)
 
-    rows = rows[:3]
     # Run parallel processing
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
         res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))
 
     out_df = pd.DataFrame.from_records(res)
-    out_df.to_csv(BASE / 'test_process.csv')
+    out_df.to_csv(BASE / 's2_ortho_download_data.csv')
+
+    tstop = time.time()
+    print(f'Script took {round(tstop-tstart, 2)}s')
 
     for i, b in enumerate(res):
         if not b:
