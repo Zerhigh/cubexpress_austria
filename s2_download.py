@@ -412,14 +412,14 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
 
 if __name__ == '__main__':
-    add_ = True
+    add_ = False
     if add_:
         table: pd.DataFrame = pd.read_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv')
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
         df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv')
     else:
         # df_filtered: pd.DataFrame = pd.read_csv(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200_withmetadata.csv")
-        df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
+        df_filtered: pd.DataFrame = pd.read_csv(BASE / "/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv")
 
     # get statelog
     # statelog: pd.DataFrame = pd.read_csv(
@@ -455,26 +455,26 @@ if __name__ == '__main__':
     # Create a multiprocessing pool
     rows = [(idx, batch) for idx, batch in df_batches]
 
-    # res = []
-    # for row in tqdm(rows[:3]):
-    #     res.append(_process_batch(data=row,
-    #                               hr_compressed_mask_path=out_ortho_target,
-    #                               hr_orthofoto_path=out_ortho_input,
-    #                               hr_harm_path=out_ortho_input_harm,
-    #                               lr_s2_path=out_sentinel2,
-    #                               lr_harm_path=out_sentinel2_harm,
-    #                               ))
+    res = []
+    for row in tqdm(rows[21:]):
+        res.append(_process_batch(data=row,
+                                  hr_compressed_mask_path=out_ortho_target,
+                                  hr_orthofoto_path=out_ortho_input,
+                                  hr_harm_path=out_ortho_input_harm,
+                                  lr_s2_path=out_sentinel2,
+                                  lr_harm_path=out_sentinel2_harm,
+                                  ))
 
-    _process_batch_partial = partial(_process_batch,
-                                     hr_compressed_mask_path=out_ortho_target,
-                                     hr_orthofoto_path=out_ortho_input,
-                                     hr_harm_path=out_ortho_input_harm,
-                                     lr_s2_path=out_sentinel2,
-                                     lr_harm_path=out_sentinel2_harm,)
-
-    # Run parallel processing
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))
+    # _process_batch_partial = partial(_process_batch,
+    #                                  hr_compressed_mask_path=out_ortho_target,
+    #                                  hr_orthofoto_path=out_ortho_input,
+    #                                  hr_harm_path=out_ortho_input_harm,
+    #                                  lr_s2_path=out_sentinel2,
+    #                                  lr_harm_path=out_sentinel2_harm,)
+    #
+    # # Run parallel processing
+    # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+    #     res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))
 
     out_df = pd.DataFrame.from_records(res)
     out_df.to_csv(BASE / 's2_ortho_download_data.csv')
