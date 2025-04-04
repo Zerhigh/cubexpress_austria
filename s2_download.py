@@ -19,7 +19,7 @@ from typing import List, Optional
 import utils_histogram
 from functools import partial
 
-from skimage.exposure import histogram_matching
+from skimage.exposure import histogram_matching # 0.25.2
 from skimage.exposure import match_histograms
 
 from rasterio.warp import reproject, Resampling
@@ -224,7 +224,7 @@ def calculate_mask_statistics(mask: np.ndarray) -> Dict[str, float]:
 
     for label in LABELS:
         count = np.count_nonzero(mask == label)
-        sats[f'dist_{label}'] = round(count / num_px, 3)
+        sats[f'dist_{label}'] = round(count / num_px, 5)
     return sats
 
 
@@ -288,7 +288,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         nodata_hr_base = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0) * 1  # (512, 512)
 
         # Harmonising and Matching
-        s2_corrs, lr_harms, hr_harms, s2_nodata = {}, {}, {}, {}
+        s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata = {}, {}, {}, {}, {}
         for s2_name, s2_image in s2_data.items():
             # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7]
             lr_s2_base = s2_image[[3, 2, 1, 7], :, :] / 10_000
@@ -306,42 +306,45 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             lr_s2_norm = lr_s2_base * nodata_lr
 
             # histogram matching
-            hr_ortho_norm_small = resample_torch(arr=hr_ortho_norm, scale_factor=0.25)
             # hr_harm_self = utils_histogram.match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0, ignore_none=True, none_value=normalized_nodata_value)
-            hr_harm_self_weird = histogram_matching.match_histograms(image=hr_ortho_norm_small,
-                                                               reference=lr_s2_norm, channel_axis=0)
+            # if False:
+            #     hr_ortho_norm_small = resample_torch(arr=hr_ortho_norm, scale_factor=0.25)
+            #     hr_harm_self_weird = histogram_matching.match_histograms(image=hr_ortho_norm_small,
+            #                                                        reference=lr_s2_norm, channel_axis=0)
+            #
+            #     hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm_small.transpose(1, 2, 0),
+            #                                                              reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
+            #
+            #     import matplotlib.pyplot as plt
+            #     fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+            #     # Plot the 128x128 array
+            #     ax[0].imshow(hr_harm_self_weird[:, :3, :].transpose(2, 0, 1), cmap='viridis')  # You can change colormap as needed
+            #     ax[0].set_title("Weird")
+            #     ax[0].axis('off')  # Hide axis for clarity
+            #
+            #     # Plot the 512x512 array
+            #     ax[1].imshow(hr_harm_self[:3].transpose(1, 2, 0), cmap='viridis')
+            #     ax[1].set_title("Normal")
+            #     ax[1].axis('off')  # Hide axis for clarity
+            #
+            #     # Show the plot
+            #     plt.tight_layout()
+            #     plt.show()
+            #
+            #     pass
+            #
+            #     #hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm.transpose(1, 2, 0), reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
 
-            hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm_small.transpose(1, 2, 0),
-                                                                     reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
-
-            import matplotlib.pyplot as plt
-            fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-            # Plot the 128x128 array
-            ax[0].imshow(hr_harm_self_weird[:, :3, :].transpose(2, 0, 1), cmap='viridis')  # You can change colormap as needed
-            ax[0].set_title("Weird")
-            ax[0].axis('off')  # Hide axis for clarity
-
-            # Plot the 512x512 array
-            ax[1].imshow(hr_harm_self[:3].transpose(1, 2, 0), cmap='viridis')
-            ax[1].set_title("Normal")
-            ax[1].axis('off')  # Hide axis for clarity
-
-            # Show the plot
-            plt.tight_layout()
-            plt.show()
-
-            pass
-
-            #hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm.transpose(1, 2, 0), reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
+            hr_harm_self = np.zeros_like(hr_ortho_norm)
+            for band in range(hr_ortho_norm.shape[0]):
+                hr_harm_self[band] = histogram_matching.match_histograms(image=hr_ortho_norm[band], reference=lr_s2_norm[band])
 
             # reduce with bilinear interpolation -> (4, 128, 128)
-            #lr_harm_self = resize(hr_harm_self, (4, 128, 128), anti_aliasing=False)
-            lr_harm_self = resample(hr_harm_self)
+            lr_harm_self = resample_torch(arr=hr_harm_self, scale_factor=0.25)  # (4, 128, 128)
 
             # Compute block-wise correlation between LR and LRharm
-            kernel_size = 32
-            #corr_self = utils_histogram.fast_block_correlation(lr_s2, lr_harm_self, block_size=kernel_size, none_value=normalized_nodata_value)
-            corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm, lr_harm_self, none_value=normalized_nodata_value)
+            corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm, lr_harm_self, none_value=0)
+            corr_ = utils_histogram.base_fast_block_correlation(lr_s2_norm, lr_harm_self, none_value=0)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
             low_cor_self = np.nanquantile(corr_self, 0.10)
@@ -349,6 +352,8 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             s2_corrs[s2_name] = round(float(low_cor_self), 4)
             lr_harms[s2_name] = lr_harm_self
             hr_harms[s2_name] = hr_harm_self
+            lr_nodata[s2_name] = nodata_lr
+            hr_nodata[s2_name] = nodata_hr
 
             # test with official changed method (including no data)
             # # hr_ortho_norm_ = np.where(hr_ortho_norm == 0, np.nan, hr_ortho_norm)
@@ -362,13 +367,26 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # Best fitting sentinel2 sample for the current orthophoto
         best_s2_key = max(s2_corrs, key=s2_corrs.get)
 
-        # redo mask
-        masked_mdata = mdata * nodata_mask
-        masked_odata = odata * nodata_mask
+        # apply shared mask
+        masked_mdata = mdata * hr_nodata[best_s2_key]
+        masked_odata = odata * hr_nodata[best_s2_key]
+
+        ########### ADD METADATA ###########
+        batch_statistics['low_corr'] = s2_corrs[best_s2_key]
+        batch_statistics['all_corrs'] = s2_corrs
+        batch_statistics['all_corrs'] = s2_corrs
+        batch_statistics['s2_available'] = True
+
         # Recalculate mask distribution statistics after masking with nodata
         mask_stats = calculate_mask_statistics(mask=masked_mdata)
         for k, v in mask_stats.items():
             batch_statistics[k] = v
+
+        # derive nodata value on the nodata distribution value from the distribution, rounded to 5 decimals
+        if batch_statistics['dist_0'] > 0:
+            batch_statistics['contains_nodata'] = True
+        else:
+            batch_statistics['contains_nodata'] = False
 
         # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
         selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
@@ -376,9 +394,6 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         for k, v in row_dict.items():
             if 'Unnamed' not in k or 'dist_' not in k:
                 batch_statistics[k] = v
-
-        batch_statistics['low_corr'] = s2_corrs[best_s2_key]
-        batch_statistics['all_corrs'] = s2_corrs
 
         ########### WRITE FILES ###########
         batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
@@ -449,11 +464,6 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             file = Path(BASE / "tmp" / f"{row['s2_download_id']}.tif")
             file.unlink()
 
-        batch_statistics['s2_available'] = True
-        if np.any(nodata_mask == False):
-            batch_statistics['contains_nodata'] = True
-        else:
-            batch_statistics['contains_nodata'] = False
         return batch_statistics
     # except Exception as e:
     #     # In case of errors, append None
