@@ -39,9 +39,10 @@ except Exception:
     ee.Authenticate(auth_mode="notebook")
     ee.Initialize(project='ee-samuelsuperresolution')
 
-BASE = Path('/data/USERS/shollend/combined_download/')
-#BASE = Path('/home/shollend/Desktop/combined_download')
-LABELS = (0, 40, 41, 42, 48, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 72, 83, 84, 87, 88, 92, 95, 96)
+BASE = Path('/data/USERS/shollend/combined_download_nodata_test/')
+#BASE = Path('/home/shollend/shares/users/master/dl2/combined_download')
+
+LABELS = (0, 40, 41, 42, 48, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 72, 83, 84, 87, 88, 92, 95, 96)
 IMG_SHAPE = [512, 512]
 UPSAMPLE = 4
 DOWNSAMPLE = 0.25
@@ -252,6 +253,16 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # ADD S2 NODATA MASK - Currently ignored on purpose
         # create boolean mask for filtering and homogenising all image data
         nodata_mask = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0)
+        print('image', new_id)
+        print(oprofile)
+        print(oprofile['nodata'])
+        count_0 = np.sum(mdata == 0)
+        count_1 = np.sum(odata == 0)
+
+        print(" mdata, Count of 0s:", count_0)
+        print(" odata, Count of 0s:", count_1)
+        print(" nodatamask, Count of falses:", np.sum(nodata_mask == False))
+
         masked_mdata = mdata * nodata_mask
         masked_odata = odata * nodata_mask
 
