@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, none_value: float = 0, block_size: int = 16) -> np.ndarray:
     """
     Compute the Pearson correlation coefficient for non-overlapping blocks of two images.
@@ -28,7 +29,7 @@ def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, none_value: float
         correlations = []
         for channel_index in range(img1.shape[0]):
             correlations.append(
-                fast_block_correlation(img1[channel_index], img2[channel_index], block_size)
+                fast_block_correlation(img1[channel_index], img2[channel_index], none_value, block_size)
             )
         return np.array(correlations)
     
@@ -61,8 +62,7 @@ def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, none_value: float
     return block_correlations
 
 
-def base_fast_block_correlation(img1: np.ndarray, img2: np.ndarray, none_value: float = 0,
-                           block_size: int = 16) -> np.ndarray:
+def base_fast_block_correlation(img1: np.ndarray, img2: np.ndarray, block_size: int = 16) -> np.ndarray:
     """
     Compute the Pearson correlation coefficient for non-overlapping blocks of two images.
 

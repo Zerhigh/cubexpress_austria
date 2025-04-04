@@ -237,11 +237,10 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
     index, batch = data
     batch_statistics = {}
-    if True:
+    try:
         # first item should have same lat/lon as all others
         lat, lon, id = batch.iloc[0]['lat'], batch.iloc[0]['lon'], batch.iloc[0]['id']
         new_id = f"{id:05d}"
-        print(f'image {id}')
 
         # Prepare the raster transform
         geotransform = cubexpress.lonlat2rt(
@@ -255,7 +254,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel images into memory (for all bands)
-        #download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
         s2_profile, s2_data = load_sentinel2_samples(path_list=batch_s2_paths)
         s2_profile.update(blockxsize=32, blockysize=32, nodata=0)
@@ -286,6 +285,8 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # methods for dimesion filtering is included in resampling_*torch()
 
         nodata_hr_base = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0) * 1  # (512, 512)
+        print(new_id)
+        print(np.count_nonzero(nodata_hr_base > 0), nodata_hr_base.shape)
 
         # Harmonising and Matching
         s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata = {}, {}, {}, {}, {}
@@ -296,6 +297,8 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             # create binary mask for filtering and homogenising all image data
             nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0) * 1  # (128, 128)
             nodata_hr_s2 = resample_mask_torch(arr=nodata_lr_s2, scale_factor=4)  # (128, 128) -> (512, 512)
+
+            print(np.count_nonzero(nodata_lr_s2 > 0), nodata_lr_s2.shape)
 
             # stack since arrays are now single band (512, 512)
             nodata_hr = np.all(np.stack([nodata_hr_base, nodata_hr_s2], axis=0) != 0, axis=0) * 1  # (512, 512)
@@ -343,11 +346,14 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             lr_harm_self = resample_torch(arr=hr_harm_self, scale_factor=0.25)  # (4, 128, 128)
 
             # Compute block-wise correlation between LR and LRharm
-            corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm, lr_harm_self, none_value=0)
-            corr_ = utils_histogram.base_fast_block_correlation(lr_s2_norm, lr_harm_self, none_value=0)
+            # the way i have written the correlatin HIGH nan value images are prioitised as they have a large overlap!!!!!!!!
+            #corr_ = utils_histogram.fast_block_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr, none_value=0)
+            corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr,
+                                                                 none_value=0)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
             low_cor_self = np.nanquantile(corr_self, 0.10)
+            #low_cor_self_ = np.nanquantile(corr_, 0.10)
 
             s2_corrs[s2_name] = round(float(low_cor_self), 4)
             lr_harms[s2_name] = lr_harm_self
@@ -366,7 +372,8 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
         # Best fitting sentinel2 sample for the current orthophoto
         best_s2_key = max(s2_corrs, key=s2_corrs.get)
-
+        hr_mask = hr_nodata[best_s2_key]
+        print(np.count_nonzero(hr_mask > 0), hr_mask.shape)
         # apply shared mask
         masked_mdata = mdata * hr_nodata[best_s2_key]
         masked_odata = odata * hr_nodata[best_s2_key]
@@ -435,13 +442,13 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         )
 
         with rasterio.open(hr_harm_path / f'HR_ortho_{new_id}.tif', "w", **harm_hr_profile) as dst:
-            dst.write((hr_harms[best_s2_key] * 10_000).round().astype(rasterio.uint16))
+            dst.write((hr_harms[best_s2_key] * hr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
         # Normal S2 - NODAtA update?
         # file = Path(BASE / "tmp" / f"{best_s2_key}.tif")
         # file.rename(lr_s2_path / f'S2_{new_id}.tif')
         with rasterio.open(lr_s2_path / f'S2_{new_id}.tif', "w", **s2_profile) as dst:
-            lr_save_data = s2_data[best_s2_key] * lr_nodata_mask
+            lr_save_data = s2_data[best_s2_key] * lr_nodata[best_s2_key]
             dst.write(lr_save_data)
 
         # Harmonized S2
@@ -457,7 +464,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         )
 
         with rasterio.open(lr_harm_path / f'S2_{new_id}.tif', "w", **harm_lr_profile) as dst:
-            dst.write((lr_harms[best_s2_key] * 10_000).round().astype(rasterio.uint16))
+            dst.write((lr_harms[best_s2_key] * lr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
         # remove unwanted sentinel images
         for i, row in batch.iterrows():
@@ -465,10 +472,10 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             file.unlink()
 
         return batch_statistics
-    # except Exception as e:
-    #     # In case of errors, append None
-    #     print(f'Error at panda index {index}: {e}')
-    #     return batch_statistics
+    except Exception as e:
+        # In case of errors, append None
+        print(f'Error at panda index {index}: {e}')
+        return batch_statistics
 
 
 if __name__ == '__main__':
@@ -512,7 +519,7 @@ if __name__ == '__main__':
     rows = [(idx, batch) for idx, batch in df_batches]
 
     res = []
-    for row in tqdm(rows[:3]):
+    for row in tqdm(rows[20:]):
         res.append(_process_batch(data=row,
                                   hr_compressed_mask_path=out_ortho_target,
                                   hr_orthofoto_path=out_ortho_input,
@@ -530,7 +537,7 @@ if __name__ == '__main__':
     #
     # # Run parallel processing
     # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-    #     res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))
+    #     res = list(tqdm(executor.map(_process_batch_partial, rows[20:25]), total=len(rows)))
 
     out_df = pd.DataFrame.from_records(res)
     out_df.to_csv(BASE / 's2_ortho_download_data.csv')
