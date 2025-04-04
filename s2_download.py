@@ -1,5 +1,5 @@
 import time
-
+from PIL import Image
 import ee
 import numpy as np
 import pandas as pd
@@ -8,10 +8,10 @@ import geopandas as gpd
 import json
 from typing import Tuple, List, Optional, Any, Dict, Hashable
 import rasterio
-from skimage.transform import resize
 import utm
 import os
 from pathlib import Path
+import torch
 import shutil
 from tqdm import tqdm
 import cubexpress
@@ -19,7 +19,7 @@ from typing import List, Optional
 import utils_histogram
 from functools import partial
 
-import skimage
+from skimage.exposure import histogram_matching
 
 from rasterio.warp import reproject, Resampling
 from shapely.geometry import box
@@ -39,8 +39,9 @@ except Exception:
     ee.Authenticate(auth_mode="notebook")
     ee.Initialize(project='ee-samuelsuperresolution')
 
-BASE = Path('/data/USERS/shollend/combined_download_nodata_test/')
+#BASE = Path('/data/USERS/shollend/combined_download_nodata_test/')
 #BASE = Path('/home/shollend/shares/users/master/dl2/combined_download')
+BASE = Path('./local_experiment/')
 
 LABELS = (0, 40, 41, 42, 48, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 72, 83, 84, 87, 88, 92, 95, 96)
 IMG_SHAPE = [512, 512]
@@ -53,6 +54,45 @@ DOWNSAMPLE = 0.25
 # austria33 = austria.to_crs('32633')
 # GEOMS = {32: austria32.loc[[0], 'geometry'].values[0], 33: austria33.loc[[0], 'geometry'].values[0]}
 
+
+def resample_mask_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
+    """
+    Args:
+        arr: (channel x width x height) array will be resampled to (channel x scale_factor*width x scale_factor*height)
+        scale_factor: float, 0.25 for HR -> LR
+                             4 for HR -> LR
+
+    Returns: ret_arr
+
+    """
+    if arr.ndim == 2:
+        arr = np.expand_dims(arr, axis=0)
+    ret_arr = torch.nn.functional.interpolate(
+        torch.from_numpy(arr).unsqueeze(0).float(),
+        scale_factor=scale_factor,
+        mode="bilinear",
+        antialias=True
+    ).squeeze().numpy()
+    return (ret_arr.squeeze() > 0.5).astype(np.uint8)
+
+
+def resample_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
+    """
+    Args:
+        arr: (channel x width x height) array will be resampled to (channel x scale_factor*width x scale_factor*height)
+        scale_factor: float, 0.25 for HR -> LR
+                             4 for HR -> LR
+
+    Returns: ret_arr
+
+    """
+    ret_arr = torch.nn.functional.interpolate(
+        torch.from_numpy(arr).unsqueeze(0),
+        scale_factor=scale_factor,
+        mode="bilinear",
+        antialias=True
+    ).squeeze().numpy()
+    return ret_arr
 
 def build_sentinel2_path(s2_id: str, sr_ids: List[str], other_ids: List[str]) -> str:
     """
@@ -196,7 +236,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
     index, batch = data
     batch_statistics = {}
-    try:
+    if True:
         # first item should have same lat/lon as all others
         lat, lon, id = batch.iloc[0]['lat'], batch.iloc[0]['lon'], batch.iloc[0]['id']
         new_id = f"{id:05d}"
@@ -213,27 +253,16 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel images into memory (for all bands)
-        download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        #download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
         s2_profile, s2_data = load_sentinel2_samples(path_list=batch_s2_paths)
-        s2_profile.update(
-            blockxsize=32,
-            blockysize=32,
-            nodata=0,
-            # compress="zstd",
-            # zstd_level=13,
-            # interleave="band",
-            # discard_lsb=2
-        )
+        s2_profile.update(blockxsize=32, blockysize=32, nodata=0)
 
         # load corresponding orthofoto
-        # /data/USERS/shollend/orthophoto/austria_full_allclasses_regridded
-        ortho_base = Path('/data/USERS/shollend/orthophoto/austria_full_allclasses_regridded')
+        # ortho_base = Path('/data/USERS/shollend/orthophoto/austria_full_allclasses_regridded')
+        ortho_base = Path('C:/Users/PC/Coding/cubexpress_austria/local_experiment/local_orthofotos')
         input_path = ortho_base / 'input' / f'input_{id}.tif'
         target_path = ortho_base / 'target' / f'target_{id}.tif'
-
-        # input_path = BASE / 'local_orthofotos' / 'input' / f'input_{id}.tif'
-        # target_path = BASE / 'local_orthofotos' / 'target' / f'target_{id}.tif'
 
         # transform and resample the orthofoto images and masks
         mdata, mprofile = transform_ortho(ortho_fp=target_path,
@@ -250,56 +279,43 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                           s2_height=IMG_SHAPE[1],
                                           )
 
-        # ADD S2 NODATA MASK - Currently ignored on purpose
-        # create boolean mask for filtering and homogenising all image data
-        nodata_mask = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0)
-        print('image', new_id)
-        print(oprofile)
-        print(oprofile['nodata'])
-        count_0 = np.sum(mdata == 0)
-        count_1 = np.sum(odata == 0)
+        # All resampling will be conducted with Pytorch Pillow bilinear wrapper as it introduces the least errors
+        # https://zuru.tech/blog/the-dangers-behind-image-resizing
+        # methods for dimesion filtering is included in resampling_*torch()
 
-        print(" mdata, Count of 0s:", count_0)
-        print(" odata, Count of 0s:", count_1)
-        print(" nodatamask, Count of falses:", np.sum(nodata_mask == False))
-
-        masked_mdata = mdata * nodata_mask
-        masked_odata = odata * nodata_mask
-
-        # Recalculate mask distribution statistics after masking with nodata
-        mask_stats = calculate_mask_statistics(mask=masked_mdata)
-        for k, v in mask_stats.items():
-            batch_statistics[k] = v
-
-        # Degrade HR to LR using bilinear interpolation AND normalize (order=1 → Bilinear interpolation)
-
-        lr_nodata_mask = resize(nodata_mask, (128, 128), anti_aliasing=False)
-        hr_ortho_norm = masked_odata / 255
-        #hr_ortho_norm = resize(masked_odata / 255, (4, 128, 128), anti_aliasing=False)
-
-        #lr_ortho = resize(masked_odata / 255, (4, 128, 128), anti_aliasing=False)
-        #lr_ortho = zoom(masked_odata / 255, (1, DOWNSAMPLE, DOWNSAMPLE), order=1)
-        #lr_ortho = zoom(masked_odata / 255, (1, 0.25, 0.25), order=1)
-
-        normalized_nodata_value = 0 / 255
+        nodata_hr_base = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0) * 1
 
         # Harmonising and Matching
-        s2_corrs, lr_harms, hr_harms = {}, {}, {}
+        s2_corrs, lr_harms, hr_harms, s2_nodata = {}, {}, {}, {}
         for s2_name, s2_image in s2_data.items():
             # apply mask and normalize
             # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7]
-            lr_s2 = (s2_image[[3, 2, 1, 7], :, :] * lr_nodata_mask) / 10_000
+            lr_s2_base = s2_image[[3, 2, 1, 7], :, :] / 10_000
 
-            # histogram matching -> output 4, 512, 512
-            hr_harm_self = utils_histogram.match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0, ignore_none=True, none_value=normalized_nodata_value)
+            # create binary mask for filtering and homogenising all image data
+            nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0) * 1  # (128, 128)
+            nodata_hr_s2 = resample_mask_torch(arr=nodata_lr_s2, scale_factor=4)  # (128, 128) -> (512, 512)
 
-            # reduce with bilinear interpolation -> output 4, 128, 128
-            lr_harm_self = resize(hr_harm_self, (4, 128, 128), anti_aliasing=False)
+            # stack sice arrays are now single band (512, 512)
+            nodata_hr = np.all(np.stack([nodata_hr_base, nodata_hr_s2], axis=0) != 0, axis=0) * 1
+            nodata_lr = resample_mask_torch(arr=nodata_hr, scale_factor=0.25)
+
+            # apply masks to hr_ortho and normalize
+            hr_ortho_norm = odata / 255 * nodata_hr
+            lr_s2_norm = lr_s2_base * nodata_lr
+
+            # histogram matching -> (4, 512, 512)
+            # hr_harm_self = utils_histogram.match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0, ignore_none=True, none_value=normalized_nodata_value)
+            hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm, reference=lr_s2_norm, channel_axis=0)
+
+            # reduce with bilinear interpolation -> (4, 128, 128)
+            #lr_harm_self = resize(hr_harm_self, (4, 128, 128), anti_aliasing=False)
+            lr_harm_self = resample(hr_harm_self)
 
             # Compute block-wise correlation between LR and LRharm
             kernel_size = 32
             #corr_self = utils_histogram.fast_block_correlation(lr_s2, lr_harm_self, block_size=kernel_size, none_value=normalized_nodata_value)
-            corr_self = utils_histogram.own_bandwise_correlation(lr_s2, lr_harm_self, none_value=normalized_nodata_value)
+            corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm, lr_harm_self, none_value=normalized_nodata_value)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
             low_cor_self = np.nanquantile(corr_self, 0.10)
@@ -319,6 +335,14 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
         # Best fitting sentinel2 sample for the current orthophoto
         best_s2_key = max(s2_corrs, key=s2_corrs.get)
+
+        # redo mask
+        masked_mdata = mdata * nodata_mask
+        masked_odata = odata * nodata_mask
+        # Recalculate mask distribution statistics after masking with nodata
+        mask_stats = calculate_mask_statistics(mask=masked_mdata)
+        for k, v in mask_stats.items():
+            batch_statistics[k] = v
 
         # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
         selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
@@ -405,10 +429,10 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         else:
             batch_statistics['contains_nodata'] = False
         return batch_statistics
-    except Exception as e:
-        # In case of errors, append None
-        print(f'Error at panda index {index}: {e}')
-        return batch_statistics
+    # except Exception as e:
+    #     # In case of errors, append None
+    #     print(f'Error at panda index {index}: {e}')
+    #     return batch_statistics
 
 
 if __name__ == '__main__':
@@ -418,12 +442,8 @@ if __name__ == '__main__':
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
         df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv')
     else:
-        # df_filtered: pd.DataFrame = pd.read_csv(BASE / "tables" / "ccs_090_ALL_S2_filter_sample200_withmetadata.csv")
-        df_filtered: pd.DataFrame = pd.read_csv(BASE / "/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv")
-
-    # get statelog
-    # statelog: pd.DataFrame = pd.read_csv(
-    #     "C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/statelogs/austria_full_allclasses_regridded/statelog.csv")
+        # df_filtered: pd.DataFrame = pd.read_csv(BASE / "/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv")
+        df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
 
     # ortho path
     # /data/USERS/shollend/orthophoto/austria_full_allclasses_regridded
@@ -456,7 +476,7 @@ if __name__ == '__main__':
     rows = [(idx, batch) for idx, batch in df_batches]
 
     res = []
-    for row in tqdm(rows[21:]):
+    for row in tqdm(rows[:3]):
         res.append(_process_batch(data=row,
                                   hr_compressed_mask_path=out_ortho_target,
                                   hr_orthofoto_path=out_ortho_input,
