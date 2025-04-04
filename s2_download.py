@@ -20,6 +20,7 @@ import utils_histogram
 from functools import partial
 
 from skimage.exposure import histogram_matching
+from skimage.exposure import match_histograms
 
 from rasterio.warp import reproject, Resampling
 from shapely.geometry import box
@@ -240,6 +241,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # first item should have same lat/lon as all others
         lat, lon, id = batch.iloc[0]['lat'], batch.iloc[0]['lon'], batch.iloc[0]['id']
         new_id = f"{id:05d}"
+        print(f'image {id}')
 
         # Prepare the raster transform
         geotransform = cubexpress.lonlat2rt(
@@ -283,12 +285,11 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # https://zuru.tech/blog/the-dangers-behind-image-resizing
         # methods for dimesion filtering is included in resampling_*torch()
 
-        nodata_hr_base = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0) * 1
+        nodata_hr_base = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0) * 1  # (512, 512)
 
         # Harmonising and Matching
         s2_corrs, lr_harms, hr_harms, s2_nodata = {}, {}, {}, {}
         for s2_name, s2_image in s2_data.items():
-            # apply mask and normalize
             # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7]
             lr_s2_base = s2_image[[3, 2, 1, 7], :, :] / 10_000
 
@@ -296,17 +297,42 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0) * 1  # (128, 128)
             nodata_hr_s2 = resample_mask_torch(arr=nodata_lr_s2, scale_factor=4)  # (128, 128) -> (512, 512)
 
-            # stack sice arrays are now single band (512, 512)
-            nodata_hr = np.all(np.stack([nodata_hr_base, nodata_hr_s2], axis=0) != 0, axis=0) * 1
-            nodata_lr = resample_mask_torch(arr=nodata_hr, scale_factor=0.25)
+            # stack since arrays are now single band (512, 512)
+            nodata_hr = np.all(np.stack([nodata_hr_base, nodata_hr_s2], axis=0) != 0, axis=0) * 1  # (512, 512)
+            nodata_lr = resample_mask_torch(arr=nodata_hr, scale_factor=0.25)  # (128, 128)
 
-            # apply masks to hr_ortho and normalize
+            # apply masks and normalize
             hr_ortho_norm = odata / 255 * nodata_hr
             lr_s2_norm = lr_s2_base * nodata_lr
 
-            # histogram matching -> (4, 512, 512)
+            # histogram matching
+            hr_ortho_norm_small = resample_torch(arr=hr_ortho_norm, scale_factor=0.25)
             # hr_harm_self = utils_histogram.match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0, ignore_none=True, none_value=normalized_nodata_value)
-            hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm, reference=lr_s2_norm, channel_axis=0)
+            hr_harm_self_weird = histogram_matching.match_histograms(image=hr_ortho_norm_small,
+                                                               reference=lr_s2_norm, channel_axis=0)
+
+            hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm_small.transpose(1, 2, 0),
+                                                                     reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
+
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+            # Plot the 128x128 array
+            ax[0].imshow(hr_harm_self_weird[:, :3, :].transpose(2, 0, 1), cmap='viridis')  # You can change colormap as needed
+            ax[0].set_title("Weird")
+            ax[0].axis('off')  # Hide axis for clarity
+
+            # Plot the 512x512 array
+            ax[1].imshow(hr_harm_self[:3].transpose(1, 2, 0), cmap='viridis')
+            ax[1].set_title("Normal")
+            ax[1].axis('off')  # Hide axis for clarity
+
+            # Show the plot
+            plt.tight_layout()
+            plt.show()
+
+            pass
+
+            #hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm.transpose(1, 2, 0), reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
 
             # reduce with bilinear interpolation -> (4, 128, 128)
             #lr_harm_self = resize(hr_harm_self, (4, 128, 128), anti_aliasing=False)
