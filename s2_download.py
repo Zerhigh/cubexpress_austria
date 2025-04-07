@@ -10,12 +10,14 @@ import torch
 import cubexpress
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from typing import Tuple, List, Optional, Any, Dict, Hashable
 from pathlib import Path
 from tqdm import tqdm
 
 from skimage.exposure import histogram_matching
+from skimage import io, exposure
 from rasterio.warp import reproject, Resampling
 from functools import partial
 from concurrent.futures import ProcessPoolExecutor
@@ -31,8 +33,8 @@ except Exception as e:
     ee.Authenticate(auth_mode="notebook")
     ee.Initialize(project='ee-samuelsuperresolution')
 
-#BASE = Path('/data/USERS/shollend/combined_download_nodata_test/')
-#BASE = Path('/home/shollend/shares/users/master/dl2/combined_download')
+# BASE = Path('/data/USERS/shollend/combined_download_nodata_test/')
+# BASE = Path('/home/shollend/shares/users/master/dl2/combined_download')
 BASE = Path('./local_experiment/')
 
 LABELS = (0, 40, 41, 42, 48, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 72, 83, 84, 87, 88, 92, 95, 96)
@@ -51,15 +53,17 @@ def resample_mask_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
     Returns: ret_arr
 
     """
+    # nearest neigbor interpolation for masks allows strict adherence to lr mask
     if arr.ndim == 2:
         arr = np.expand_dims(arr, axis=0)
     ret_arr = torch.nn.functional.interpolate(
         torch.from_numpy(arr).unsqueeze(0).float(),
         scale_factor=scale_factor,
-        mode="bilinear",
-        antialias=True
+        mode="nearest",
+        #antialias=True
     ).squeeze().numpy()
-    return (ret_arr.squeeze() > 0.5).astype(np.uint8)
+    return (ret_arr.squeeze()).astype(bool)
+    #return (ret_arr.squeeze() > 0.5).astype(np.uint8)
 
 
 def resample_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
@@ -214,13 +218,98 @@ def calculate_mask_statistics(mask: np.ndarray) -> Dict[str, float]:
     return sats
 
 
+def masked_match_histograms(image: np.ndarray,
+                            reference: np.ndarray,
+                            image_mask: np.ndarray,
+                            reference_mask: np.ndarray,
+                            fill_value=0):
+    # adapted from https://gist.github.com/tayden/dcc83424ce55bfb970f60db3d4ddad18
+    # to include masks for the input and reference image
+    if image_mask.ndim < 3:
+        image_mask = np.stack([image_mask]*4, axis=0)
+    if reference_mask.ndim < 3:
+        reference_mask = np.stack([reference_mask]*4, axis=0)
+    masked_source_image = np.ma.array(image, mask=image_mask)
+    masked_reference_image = np.ma.array(reference, mask=reference_mask)
+
+    matched = np.ma.array(np.empty(image.shape, dtype=image.dtype),
+                          mask=image_mask, fill_value=fill_value)
+
+    for channel in range(masked_source_image.shape[0]):
+        matched_channel = exposure.match_histograms(masked_source_image[channel].compressed(),
+                                                    masked_reference_image[channel].compressed())
+
+        # Re-insert masked background
+        mask_ch = image_mask[channel]
+        matched[channel][~mask_ch] = matched_channel.ravel()
+
+    return matched.filled()
+
+
+def plot_band_histograms(array1, array2, array3, figname, corr, nodata_val=0, bins=256):
+    """
+    Plots histograms of each band for two multi-band arrays side-by-side.
+    - array1, array2: shape (bands, height, width)
+    - nodata_val: value to ignore (e.g., 0)
+    """
+    assert array1.shape == array2.shape, "Arrays must be the same shape"
+    bands = array1.shape[0]
+
+    fig, axs = plt.subplots(1, bands, figsize=(5 * bands, 4))
+
+    if bands == 1:
+        axs = [axs]  # ensure axs is iterable for single band
+
+    for b in range(bands):
+        a1 = array1[b].ravel()
+        a2 = array2[b].ravel()
+        a3 = array2[b].ravel()
+
+        a1 = a1[a1 != nodata_val]
+        a2 = a2[a2 != nodata_val]
+        a3 = a3[a3 != nodata_val]
+
+        hist1, bin_edges = np.histogram(a1, bins=bins, density=True)
+        hist2, _ = np.histogram(a2, bins=bin_edges, density=True)
+        hist3, _ = np.histogram(a3, bins=bin_edges, density=True)
+
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+        axs[b].plot(bin_centers, hist1, label='lr harm', color='blue')
+        axs[b].plot(bin_centers, hist2, label='lr', color='orange')
+        axs[b].plot(bin_centers, hist3, label='hr', color='green')
+        axs[b].set_title(f'Band {b + 1}')
+        axs[b].set_xlabel('Pixel Value')
+        axs[b].set_ylabel('Density')
+        axs[b].legend()
+
+    plt.title(f'corr {corr}')
+
+    plt.tight_layout()
+    plt.savefig(f'fig_{figname}.png')
+
+
+def bandwise_corr(img1, img2, nodata_val=0):
+    correlations = []
+    for b in range(img1.shape[0]):
+        a = img1[b]
+        b_ = img2[b]
+        valid_mask = (a != nodata_val) & (b_ != nodata_val)
+
+        if np.any(valid_mask):
+            corr = np.corrcoef(a[valid_mask], b_[valid_mask])[0, 1]
+        else:
+            corr = np.nan
+        correlations.append(corr)
+    return correlations
+
+
 def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                    hr_compressed_mask_path: Path,
                    hr_orthofoto_path: Path,
                    hr_harm_path: Path,
                    lr_s2_path: Path,
-                   lr_harm_path: Path,) -> Dict:
-
+                   lr_harm_path: Path, ) -> Dict:
     index, batch = data
     batch_statistics = {}
     try:
@@ -240,7 +329,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel images into memory (for all bands)
-        download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        #download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
         s2_profile, s2_data = load_sentinel2_samples(path_list=batch_s2_paths)
         s2_profile.update(blockxsize=32, blockysize=32, nodata=0)
@@ -270,85 +359,68 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # https://zuru.tech/blog/the-dangers-behind-image-resizing
         # methods for dimesion filtering is included in resampling_*torch()
 
-        nodata_mdata = np.all(mdata != 0, axis=0) * 1  # (512, 512)
-        nodata_odata = np.all(odata != 0, axis=0) * 1  # (512, 512)
+        # Binary masks for processing will be saved as nodata=True in accordance with np.masked array Regulation
+        # Binary masks saved and applied to images will be inversely saved: nodata = False to allow binary
+        # multiplication: image (4, 128, 128) * mask (128, 128)
+        nodata_hr_mdata = np.all(mdata != 0, axis=0)  # (512, 512)
+        nodata_hr_odata = np.all(odata != 0, axis=0)  # (512, 512)
+        nodata_lr_mdata = resample_mask_torch(arr=nodata_hr_mdata, scale_factor=0.25)  # (128, 128)
+        nodata_lr_odata = resample_mask_torch(arr=nodata_hr_odata, scale_factor=0.25)  # (128, 128)
 
         # Harmonising and Matching
-        s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata, s2_nodata = {}, {}, {}, {}, {}, {}
+        s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata, s2_nodata, weighted_corr, median_corr = {}, {}, {}, {}, {}, {}, {}, {}
         for s2_name, s2_image in s2_data.items():
             # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7]
             lr_s2_base = s2_image[[3, 2, 1, 7], :, :] / 10_000
 
             # create binary mask for filtering and homogenising all image data
-            nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0) * 1  # (128, 128)
-            nodata_hr_s2 = resample_mask_torch(arr=nodata_lr_s2, scale_factor=4)  # (128, 128) -> (512, 512)
+            nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0)  # (128, 128)
 
-            # stack since arrays are now single band (512, 512)
-            nodata_hr = np.all(np.stack([nodata_mdata, nodata_odata, nodata_hr_s2], axis=0) != 0, axis=0) * 1  # (512, 512)
-            nodata_lr = resample_mask_torch(arr=nodata_hr, scale_factor=0.25)  # (128, 128)
+            # Rescale and apply the mask for the hr component
+            nodata_lr = np.all(np.stack([nodata_lr_s2, nodata_lr_mdata, nodata_lr_odata], axis=0) != 0, axis=0)  # (128, 128)
+            nodata_hr = resample_mask_torch(arr=nodata_lr, scale_factor=4)  # (512, 512)
 
             # apply masks and normalize
-            hr_ortho_norm = odata / 255 * nodata_hr
-            lr_s2_norm = lr_s2_base * nodata_lr
+            hr_ortho_norm = odata / 255
+            lr_s2_norm = lr_s2_base
 
-            # histogram matching
-            # hr_harm_self = utils_histogram.match_histograms(image=hr_ortho_norm, reference=lr_s2, channel_axis=0, ignore_none=True, none_value=normalized_nodata_value)
-            # if False:
-            #     hr_ortho_norm_small = resample_torch(arr=hr_ortho_norm, scale_factor=0.25)
-            #     hr_harm_self_weird = histogram_matching.match_histograms(image=hr_ortho_norm_small,
-            #                                                        reference=lr_s2_norm, channel_axis=0)
-            #
-            #     hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm_small.transpose(1, 2, 0),
-            #                                                              reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
-            #
-            #     import matplotlib.pyplot as plt
-            #     fig, ax = plt.subplots(1, 2, figsize=(12, 6))
-            #     # Plot the 128x128 array
-            #     ax[0].imshow(hr_harm_self_weird[:, :3, :].transpose(2, 0, 1), cmap='viridis')  # You can change colormap as needed
-            #     ax[0].set_title("Weird")
-            #     ax[0].axis('off')  # Hide axis for clarity
-            #
-            #     # Plot the 512x512 array
-            #     ax[1].imshow(hr_harm_self[:3].transpose(1, 2, 0), cmap='viridis')
-            #     ax[1].set_title("Normal")
-            #     ax[1].axis('off')  # Hide axis for clarity
-            #
-            #     # Show the plot
-            #     plt.tight_layout()
-            #     plt.show()
-            #
-            #     pass
-            #
-            #     #hr_harm_self = histogram_matching.match_histograms(image=hr_ortho_norm.transpose(1, 2, 0), reference=lr_s2_norm.transpose(1, 2, 0), channel_axis=0)
-
-            hr_harm_self = np.zeros_like(hr_ortho_norm)
-            for band in range(hr_ortho_norm.shape[0]):
-                hr_harm_self[band] = histogram_matching.match_histograms(image=hr_ortho_norm[band], reference=lr_s2_norm[band])
+            hr_harm_self = masked_match_histograms(image=hr_ortho_norm,
+                                                   reference=lr_s2_norm,
+                                                   image_mask=~nodata_hr,
+                                                   reference_mask=~nodata_lr,
+                                                   )
 
             # reduce with bilinear interpolation -> (4, 128, 128)
             lr_harm_self = resample_torch(arr=hr_harm_self, scale_factor=0.25)  # (4, 128, 128)
 
             # Compute block-wise correlation between LR and LRharm
-            # the way i have written the correlatin HIGH nan value images are prioitised as they have a
+            # the way i have written the correlation HIGH nan value images are prioritized as they have a
             # large overlap!!!!!!!! -> switched to block correlation again
-            # corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr, none_value=0)
-            corr = utils_histogram.fast_block_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr, none_value=0)
-            #corr_ = utils_histogram.base_fast_block_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr)
+            corr = utils_histogram.fast_block_correlation(lr_s2_norm * nodata_lr_s2, lr_harm_self * nodata_lr,
+                                                          none_value=0, block_size=16)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
             # low_cor_self = np.nanquantile(corr_self, 0.10)
             low_corr = np.nanquantile(corr, 0.10)
-            #low_corr_ = np.nanquantile(corr_, 0.10)
+            weighted_corr_coefficient = low_corr * (1 - np.sign(low_corr) * np.sum(nodata_lr == 0)/(128*128))
+
+            # plot_band_histograms(array1=lr_harm_self * nodata_lr, array2=lr_s2_norm * nodata_lr_s2,
+            #                      array3=hr_ortho_norm * nodata_hr,
+            #                      figname=s2_name,
+            #                      corr=[low_corr, weighted_corr])
+            # low_corr_ = np.nanquantile(corr_, 0.10)
 
             s2_corrs[s2_name] = round(float(low_corr), 4)
             lr_harms[s2_name] = lr_harm_self
             hr_harms[s2_name] = hr_harm_self
             lr_nodata[s2_name] = nodata_lr
             hr_nodata[s2_name] = nodata_hr
-            s2_nodata[s2_name] = nodata_hr_s2
+            s2_nodata[s2_name] = nodata_lr_s2
+            median_corr[s2_name] = np.nanmedian(corr)
+            weighted_corr[s2_name] = weighted_corr_coefficient
 
         # Best fitting sentinel2 sample for the current orthophoto
-        best_s2_key = max(s2_corrs, key=s2_corrs.get)
+        best_s2_key = max(weighted_corr, key=weighted_corr.get)
 
         # apply shared mask
         masked_mdata = mdata * hr_nodata[best_s2_key]
@@ -357,14 +429,20 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         ########### ADD METADATA ###########
         batch_statistics['low_corr'] = s2_corrs[best_s2_key]
         batch_statistics['all_corrs'] = s2_corrs
-        batch_statistics['all_corrs'] = s2_corrs
+        batch_statistics['low_weighted_corr'] = weighted_corr[best_s2_key]
+        batch_statistics['median_corr'] = median_corr[best_s2_key]
         batch_statistics['s2_available'] = True
-        batch_statistics['nodata_ortho'] = round(np.sum(nodata_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-        batch_statistics['nodata_mask'] = round(np.sum(nodata_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-        batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[s2_name] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        batch_statistics['nodata_total'] = round(np.sum(hr_nodata[best_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[best_s2_key] == 0) / ((IMG_SHAPE[0]/4) * (IMG_SHAPE[0]/4)), 5)
 
-
-
+        # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
+        selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
+        row_dict = selected_row.iloc[0].to_dict()
+        for k, v in row_dict.items():
+            if 'Unnamed' not in k or 'dist_' not in k or 's2_available' in k:
+                batch_statistics[k] = v
 
         # Recalculate mask distribution statistics after masking with nodata
         mask_stats = calculate_mask_statistics(mask=masked_mdata)
@@ -372,17 +450,10 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             batch_statistics[k] = v
 
         # derive nodata value on the nodata distribution value from the distribution, rounded to 5 decimals
-        if batch_statistics['dist_0'] > 0:
+        if batch_statistics['nodata_total'] > 0:
             batch_statistics['contains_nodata'] = True
         else:
             batch_statistics['contains_nodata'] = False
-
-        # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
-        selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
-        row_dict = selected_row.iloc[0].to_dict()
-        for k, v in row_dict.items():
-            if 'Unnamed' not in k or 'dist_' not in k:
-                batch_statistics[k] = v
 
         ########### WRITE FILES ###########
         batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
@@ -463,7 +534,8 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 if __name__ == '__main__':
     add_ = False
     if add_:
-        table: pd.DataFrame = pd.read_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv')
+        table: pd.DataFrame = pd.read_csv(
+            '/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv')
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
         df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv')
     else:
@@ -502,7 +574,7 @@ if __name__ == '__main__':
     rows = [(idx, batch) for idx, batch in df_batches]
 
     res = []
-    for row in tqdm(rows[20:]):
+    for row in tqdm(rows[:5]):
         res.append(_process_batch(data=row,
                                   hr_compressed_mask_path=out_ortho_target,
                                   hr_orthofoto_path=out_ortho_input,
@@ -526,7 +598,7 @@ if __name__ == '__main__':
     out_df.to_csv(BASE / 's2_ortho_download_data.csv')
 
     tstop = time.time()
-    print(f'Script took {round(tstop-tstart, 2)}s')
+    print(f'Script took {round(tstop - tstart, 2)}s')
 
     for i, b in enumerate(res):
         if not b:

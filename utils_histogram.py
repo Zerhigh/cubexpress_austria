@@ -58,6 +58,7 @@ def fast_block_correlation(img1: np.ndarray, img2: np.ndarray, none_value: float
             else:
                 # Flatten the blocks and compute the Pearson correlation using np.corrcoef
                 block_correlations[i, j] = np.corrcoef(valid_band1, valid_band2)[0, 1]
+                pass
     
     return block_correlations
 
