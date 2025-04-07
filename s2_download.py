@@ -1,37 +1,28 @@
+import os
+# os.environ['CONDA_PREFIX'] = 'C:/Users/PC/anaconda3/envs/cubexpress_austria2/Library/share/gdal/'
+# os.environ['GDAL_DATA'] = os.environ['CONDA_PREFIX'] + '/Library/share/gdal'
+# os.environ['PROJ_LIB'] = os.environ['CONDA_PREFIX'] + '/Library/share'
+
 import time
-from PIL import Image
 import ee
+import rasterio
+import torch
+import cubexpress
 import numpy as np
 import pandas as pd
-#from osgeo import gdal  # Import gdal before rasterio
-import geopandas as gpd
-import json
+
 from typing import Tuple, List, Optional, Any, Dict, Hashable
-import rasterio
-import utm
-import os
 from pathlib import Path
-import torch
-import shutil
 from tqdm import tqdm
-import cubexpress
-from typing import List, Optional
-import utils_histogram
-from functools import partial
 
-from skimage.exposure import histogram_matching # 0.25.2
-from skimage.exposure import match_histograms
-
+from skimage.exposure import histogram_matching
 from rasterio.warp import reproject, Resampling
-from shapely.geometry import box
-
-from multiprocessing import Pool
-from multiprocessing import get_context
+from functools import partial
 from concurrent.futures import ProcessPoolExecutor
 
-from scipy.ndimage import zoom
+import utils_histogram
 
-# ----------------------------------------------
+# --------------------------------------------------
 # Initialize the Earth Engine API
 # --------------------------------------------------
 try:
@@ -48,12 +39,6 @@ LABELS = (0, 40, 41, 42, 48, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
 IMG_SHAPE = [512, 512]
 UPSAMPLE = 4
 DOWNSAMPLE = 0.25
-
-
-# austria = gpd.read_file('C:/Users/PC/Desktop/TU/Master/MasterThesis/data/metadata/oesterreich_border/oesterreich.shp')
-# austria32 = austria.to_crs('32632')
-# austria33 = austria.to_crs('32633')
-# GEOMS = {32: austria32.loc[[0], 'geometry'].values[0], 33: austria33.loc[[0], 'geometry'].values[0]}
 
 
 def resample_mask_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
@@ -94,6 +79,7 @@ def resample_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
         antialias=True
     ).squeeze().numpy()
     return ret_arr
+
 
 def build_sentinel2_path(s2_id: str, sr_ids: List[str], other_ids: List[str]) -> str:
     """
@@ -285,8 +271,6 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # methods for dimesion filtering is included in resampling_*torch()
 
         nodata_hr_base = np.all(np.concatenate([mdata, odata], axis=0) != 0, axis=0) * 1  # (512, 512)
-        print(new_id)
-        print(np.count_nonzero(nodata_hr_base > 0), nodata_hr_base.shape)
 
         # Harmonising and Matching
         s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata = {}, {}, {}, {}, {}
@@ -297,8 +281,6 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             # create binary mask for filtering and homogenising all image data
             nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0) * 1  # (128, 128)
             nodata_hr_s2 = resample_mask_torch(arr=nodata_lr_s2, scale_factor=4)  # (128, 128) -> (512, 512)
-
-            print(np.count_nonzero(nodata_lr_s2 > 0), nodata_lr_s2.shape)
 
             # stack since arrays are now single band (512, 512)
             nodata_hr = np.all(np.stack([nodata_hr_base, nodata_hr_s2], axis=0) != 0, axis=0) * 1  # (512, 512)
@@ -347,15 +329,14 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
             # Compute block-wise correlation between LR and LRharm
             # the way i have written the correlatin HIGH nan value images are prioitised as they have a large overlap!!!!!!!!
-            #corr_ = utils_histogram.fast_block_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr, none_value=0)
-            corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr,
-                                                                 none_value=0)
+            # corr_self = utils_histogram.own_bandwise_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr, none_value=0)
+            corr = utils_histogram.fast_block_correlation(lr_s2_norm * nodata_lr, lr_harm_self * nodata_lr, none_value=0)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
-            low_cor_self = np.nanquantile(corr_self, 0.10)
-            #low_cor_self_ = np.nanquantile(corr_, 0.10)
+            # low_cor_self = np.nanquantile(corr_self, 0.10)
+            low_corr = np.nanquantile(corr, 0.10)
 
-            s2_corrs[s2_name] = round(float(low_cor_self), 4)
+            s2_corrs[s2_name] = round(float(low_corr), 4)
             lr_harms[s2_name] = lr_harm_self
             hr_harms[s2_name] = hr_harm_self
             lr_nodata[s2_name] = nodata_lr
@@ -373,7 +354,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # Best fitting sentinel2 sample for the current orthophoto
         best_s2_key = max(s2_corrs, key=s2_corrs.get)
         hr_mask = hr_nodata[best_s2_key]
-        print(np.count_nonzero(hr_mask > 0), hr_mask.shape)
+
         # apply shared mask
         masked_mdata = mdata * hr_nodata[best_s2_key]
         masked_odata = odata * hr_nodata[best_s2_key]

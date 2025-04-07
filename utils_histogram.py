@@ -137,6 +137,37 @@ def own_bandwise_correlation(img1, img2, none_value=0):
         band1 = img1[b].ravel()
         band2 = img2[b].ravel()
 
+        # If no valid data left, return NaN
+        if band1.size == 0 or band2.size == 0:
+            correlations[b] = np.nan
+        else:
+            correlations[b] = np.corrcoef(band1, band2)[0, 1]
+
+    return correlations
+
+
+
+def own_bandwise_correlation_wbands(img1, img2, none_value=0):
+    """
+    Compute Pearson correlation per band between two multi-band images,
+    while handling no-data values.
+
+    Args:
+        img1, img2 (np.ndarray): Arrays of shape (bands, height, width).
+        nodata_value (int or float): No-data value to be ignored.
+
+    Returns:
+        np.ndarray: Correlation coefficient for each band.
+    """
+    assert img1.shape == img2.shape, "Input images must have the same shape"
+
+    bands, height, width = img1.shape
+    correlations = np.full(bands, np.nan)  # Initialize with NaN
+
+    for b in range(bands):
+        band1 = img1[b].ravel()
+        band2 = img2[b].ravel()
+
         # Mask no-data values (convert them to NaN)
         valid_mask = (band1 != none_value) & (band2 != none_value)
         valid_band1 = band1[valid_mask]
