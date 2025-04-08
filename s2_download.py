@@ -376,6 +376,12 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             # create binary mask for filtering and homogenising all image data
             nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0)  # (128, 128)
 
+            # introduce a filter to determine the nan amount in s2 and filter for it
+            perc_s2_nodata = np.sum(nodata_lr_s2 == 0) / (128 * 128)
+            if perc_s2_nodata >= 0.1:
+                # here comes the logic, also for metadata description if nothing is found
+                pass
+
             # Rescale and apply the mask for the hr component
             nodata_lr = np.all(np.stack([nodata_lr_s2, nodata_lr_mdata, nodata_lr_odata], axis=0) != 0, axis=0)  # (128, 128)
             nodata_hr = resample_mask_torch(arr=nodata_lr, scale_factor=4)  # (512, 512)
@@ -417,7 +423,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             hr_nodata[s2_name] = nodata_hr
             s2_nodata[s2_name] = nodata_lr_s2
             median_corr[s2_name] = np.nanmedian(corr)
-            weighted_corr[s2_name] = weighted_corr_coefficient
+            weighted_corr[s2_name] = round(float(weighted_corr_coefficient), 4)
 
         # Best fitting sentinel2 sample for the current orthophoto
         best_s2_key = max(weighted_corr, key=weighted_corr.get)
@@ -441,8 +447,10 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
         selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
         row_dict = selected_row.iloc[0].to_dict()
+        bad_substrings = ['Unnamed', 'dist_', 's2_available']
         for k, v in row_dict.items():
-            if 'Unnamed' not in k or 'dist_' not in k or 's2_available' in k:
+            #if 'Unnamed' not in k or 'dist_' not in k or 's2_available' not in k:
+            if not any(sub in k for sub in bad_substrings):
                 batch_statistics[k] = v
 
         # Recalculate mask distribution statistics after masking with nodata
@@ -519,9 +527,9 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             dst.write((lr_harms[best_s2_key] * lr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
         # remove unwanted sentinel images
-        for i, row in batch.iterrows():
-            file = Path(BASE / "tmp" / f"{row['s2_download_id']}.tif")
-            file.unlink()
+        # for i, row in batch.iterrows():
+        #     file = Path(BASE / "tmp" / f"{row['s2_download_id']}.tif")
+        #     file.unlink()
 
         return batch_statistics
     except Exception as e:
@@ -533,12 +541,12 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 if __name__ == '__main__':
     add_ = False
     if add_:
-        table: pd.DataFrame = pd.read_csv(
-            '/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv')
+        table: pd.DataFrame = pd.read_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv')
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
         df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv')
     else:
         # df_filtered: pd.DataFrame = pd.read_csv(BASE / "/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv")
+        # df_filtered: pd.DataFrame = pd.read_csv(Path("tables") / "merged_ALL_S2_filter.csv")
         df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
 
     # ortho path
@@ -573,7 +581,7 @@ if __name__ == '__main__':
     rows = [(idx, batch) for idx, batch in df_batches]
 
     res = []
-    for row in tqdm(rows[:5]):
+    for row in tqdm(rows[0:2]):
         res.append(_process_batch(data=row,
                                   hr_compressed_mask_path=out_ortho_target,
                                   hr_orthofoto_path=out_ortho_input,
