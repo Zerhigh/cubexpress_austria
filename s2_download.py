@@ -430,6 +430,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         batch_statistics['low_corr'] = s2_corrs[best_s2_key]
         batch_statistics['all_corrs'] = s2_corrs
         batch_statistics['low_weighted_corr'] = weighted_corr[best_s2_key]
+        batch_statistics['all_weighted_corrs'] = weighted_corr
         batch_statistics['median_corr'] = median_corr[best_s2_key]
         batch_statistics['s2_available'] = True
         batch_statistics['nodata_total'] = round(np.sum(hr_nodata[best_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
@@ -497,9 +498,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         with rasterio.open(hr_harm_path / f'HR_ortho_{new_id}.tif', "w", **harm_hr_profile) as dst:
             dst.write((hr_harms[best_s2_key] * hr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
-        # Normal S2 - NODAtA update?
-        # file = Path(BASE / "tmp" / f"{best_s2_key}.tif")
-        # file.rename(lr_s2_path / f'S2_{new_id}.tif')
+        # Normal S2
         with rasterio.open(lr_s2_path / f'S2_{new_id}.tif', "w", **s2_profile) as dst:
             lr_save_data = s2_data[best_s2_key] * lr_nodata[best_s2_key]
             dst.write(lr_save_data)

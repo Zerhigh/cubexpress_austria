@@ -4,3 +4,4 @@ data
 output
 .~lock*
 local_experiment
+*.png
