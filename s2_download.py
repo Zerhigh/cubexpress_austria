@@ -1,23 +1,20 @@
 import os
-# os.environ['CONDA_PREFIX'] = 'C:/Users/PC/anaconda3/envs/cubexpress_austria2/Library/share/gdal/'
-# os.environ['GDAL_DATA'] = os.environ['CONDA_PREFIX'] + '/Library/share/gdal'
-# os.environ['PROJ_LIB'] = os.environ['CONDA_PREFIX'] + '/Library/share'
-
 import time
 import ee
 import rasterio
 import torch
 import cubexpress
+import shapely
 import numpy as np
 import pandas as pd
+import geopandas as gpd
 import matplotlib.pyplot as plt
 
 from typing import Tuple, List, Optional, Any, Dict, Hashable
 from pathlib import Path
 from tqdm import tqdm
 
-from skimage.exposure import histogram_matching
-from skimage import io, exposure
+from skimage import exposure
 from rasterio.warp import reproject, Resampling
 from functools import partial
 from concurrent.futures import ProcessPoolExecutor
@@ -42,9 +39,43 @@ IMG_SHAPE = [512, 512]
 UPSAMPLE = 4
 DOWNSAMPLE = 0.25
 
+
 class MatchedData:
-    def __init__(self, id):
-        self.id = id
+    def __init__(self, id: str):
+        self.id: str = id
+        self.S2Batches: Dict[str, S2Batch] = {}
+        self.best_tile: S2Batch | None = None
+
+    def set_best_tile(self) -> None:
+        if len(self.S2Batches) < 1:
+            self.best_tile = None
+        else:
+            # get nodata percentage and correlation value
+            s2_merged: Dict = {s2batch.s2_id: (s2batch.total_nodata_perc, s2batch.s2_corr)
+                               for s2batch in self.S2Batches.values()}
+
+            # Sort by decreasing nodata values (1-nodata) and correlation
+            s2_sorted: Dict = dict(
+                sorted(s2_merged.items(), key=lambda item: (1 - item[1][0], item[1][1]), reverse=True)
+            )
+
+            # return best key (first in sorted dict)
+            best_s2_id: str = next(iter(s2_sorted))
+            self.best_tile = self.S2Batches[best_s2_id]
+
+
+class S2Batch:
+    def __init__(self, s2_id: str):
+        self.s2_id: str = s2_id
+        self.s2_corr: float | None = None
+        self.median_corr: float | None = None
+        self.s2_nodata_perc: float | None = None
+        self.total_nodata_perc: float | None = None
+        self.lr_harm: np.ndarray | None = None
+        self.hr_harm: np.ndarray | None = None
+        self.lr_nodata: np.ndarray | None = None
+        self.hr_nodata: np.ndarray | None = None
+        self.s2_nodata: np.ndarray | None = None
 
 
 def resample_mask_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
@@ -308,6 +339,30 @@ def bandwise_corr(img1, img2, nodata_val=0):
     return correlations
 
 
+def to_squared_geopackage(data_: pd.DataFrame) -> gpd.GeoDataFrame:
+    def to_point(row):
+        return shapely.Point(row['lon'], row['lat'])
+
+    def to_square(row, w=640):
+        lons = [row['geometry'].x - 640,
+                row['geometry'].x + 640,
+                row['geometry'].x + 640,
+                row['geometry'].x - 640,
+                row['geometry'].x - 640, ]
+        lats = [row['geometry'].y + 640,
+                row['geometry'].y + 640,
+                row['geometry'].y - 640,
+                row['geometry'].y - 640,
+                row['geometry'].y + 640, ]
+        return shapely.Polygon(list(zip(lons, lats)))
+
+    data_['geometry'] = data_.apply(to_point, axis=1)
+    data = gpd.GeoDataFrame(data_, crs='EPSG:4326')
+    data = data.to_crs(crs=31287)
+    data['geometry'] = data.apply(to_square, axis=1)
+    return data
+
+
 def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                    hr_compressed_mask_path: Path,
                    hr_orthofoto_path: Path,
@@ -320,6 +375,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         # first item should have same lat/lon as all others
         lat, lon, id = batch.iloc[0]['lat'], batch.iloc[0]['lon'], batch.iloc[0]['id']
         new_id = f"{id:05d}"
+        matched_dataset = MatchedData(id=new_id)
 
         # Prepare the raster transform
         geotransform = cubexpress.lonlat2rt(
@@ -372,8 +428,9 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         nodata_lr_odata = resample_mask_torch(arr=nodata_hr_odata, scale_factor=0.25)  # (128, 128)
 
         # Harmonising and Matching
-        s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata, s2_nodata, median_corr, s2_nodata_perc, total_nodata_perc = {}, {}, {}, {}, {}, {}, {}, {}, {}
         for s2_name, s2_image in s2_data.items():
+            s2_tile = S2Batch(s2_id=s2_name)
+
             # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7] for R, G, B, NIR
             lr_s2_base = s2_image[[3, 2, 1, 7], :, :] / 10_000
 
@@ -383,18 +440,6 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             # Rescale and apply the mask for the hr component
             nodata_lr = np.all(np.stack([nodata_lr_s2, nodata_lr_mdata, nodata_lr_odata], axis=0) != 0, axis=0)  # (128, 128)
             nodata_hr = resample_mask_torch(arr=nodata_lr, scale_factor=4)  # (512, 512)
-
-            # if perc_s2_nodata >= 0.1:
-            #     # here comes the logic, also for metadata description if nothing is found
-            #     s2_corrs[s2_name] = None
-            #     lr_harms[s2_name] = None
-            #     hr_harms[s2_name] = None
-            #     lr_nodata[s2_name] = nodata_lr
-            #     hr_nodata[s2_name] = nodata_hr
-            #     s2_nodata[s2_name] = nodata_lr_s2
-            #     median_corr[s2_name] = None
-            #
-            #     continue
 
             # apply masks and normalize
             hr_ortho_norm = odata / 255
@@ -417,157 +462,166 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
 
             # Report the 10th percentile of the correlation (low correlation) without nans
             low_corr = np.nanquantile(corr, 0.10)
-            weighted_corr_coefficient = low_corr * (1 - np.sign(low_corr) * np.sum(nodata_lr == 0)/(128*128))
+            #weighted_corr_coefficient = low_corr * (1 - np.sign(low_corr) * np.sum(nodata_lr == 0)/(128*128))
+
+            s2_tile.s2_corr = round(float(low_corr), 4)
+            s2_tile.lr_harm = lr_harm_self
+            s2_tile.hr_harm = hr_harm_self
+            s2_tile.lr_nodata = nodata_lr
+            s2_tile.hr_nodata = nodata_hr
+            s2_tile.s2_nodata = nodata_lr_s2
+            s2_tile.median_corr = np.nanmedian(corr)
+            # introduce a filter to determine the nan amount in s2 and filter for it
+            s2_tile.s2_nodata_perc = round(float(np.sum(nodata_lr_s2 == 0) / (128 * 128)), 5)
+            s2_tile.total_nodata_perc = round(float(np.sum(nodata_lr == 0) / (128 * 128)), 5)
+
+            matched_dataset.S2Batches[s2_tile.s2_id] = s2_tile
 
             # plot_band_histograms(array1=lr_harm_self * nodata_lr, array2=lr_s2_norm * nodata_lr_s2,
             #                      array3=hr_ortho_norm * nodata_hr,
             #                      figname=s2_name,
             #                      corr=[low_corr, weighted_corr])
 
-            s2_corrs[s2_name] = round(float(low_corr), 4)
-            lr_harms[s2_name] = lr_harm_self
-            hr_harms[s2_name] = hr_harm_self
-            lr_nodata[s2_name] = nodata_lr
-            hr_nodata[s2_name] = nodata_hr
-            s2_nodata[s2_name] = nodata_lr_s2
-            median_corr[s2_name] = np.nanmedian(corr)
-            # introduce a filter to determine the nan amount in s2 and filter for it
-            s2_nodata_perc[s2_name] = round(float(np.sum(nodata_lr_s2 == 0) / (128 * 128)), 5)
-            total_nodata_perc[s2_name] = round(float(np.sum(nodata_lr == 0) / (128 * 128)), 5)
+            # s2_corrs[s2_name] = round(float(low_corr), 4)
+            # lr_harms[s2_name] = lr_harm_self
+            # hr_harms[s2_name] = hr_harm_self
+            # lr_nodata[s2_name] = nodata_lr
+            # hr_nodata[s2_name] = nodata_hr
+            # s2_nodata[s2_name] = nodata_lr_s2
+            # median_corr[s2_name] = np.nanmedian(corr)
+            # # introduce a filter to determine the nan amount in s2 and filter for it
+            # s2_nodata_perc[s2_name] = round(float(np.sum(nodata_lr_s2 == 0) / (128 * 128)), 5)
+            # total_nodata_perc[s2_name] = round(float(np.sum(nodata_lr == 0) / (128 * 128)), 5)
             #weighted_corr[s2_name] = round(float(weighted_corr_coefficient), 4)
 
+        # s2_merged = {k: (total_nodata_perc[k], s2_corrs[k]) for k in total_nodata_perc if k in s2_corrs}
+        # s2_merged_filtered = {k: v for k, v in s2_merged.items() if None not in v}
+        # s2_merged_filtered_sorted = dict(sorted(s2_merged_filtered.items(), key=lambda item: (1-item[1][0], item[1][1]), reverse=True))
+        # best_s2_key = next(iter(s2_merged_filtered_sorted)) if len(s2_merged_filtered_sorted) > 0 else None
+        # if best_s2_key is None:
+        #     # select the onE with the lowest sentinel2 nodata values
+        #     lowest_s2_key = min(s2_nodata_perc, key=s2_nodata_perc.get)
+        #
+        #     batch_statistics['s2_available'] = False
+        #     batch_statistics['nodata_total'] = round(np.sum(hr_nodata[lowest_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        #     batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        #     batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        #     batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[lowest_s2_key] == 0) / (128*128), 5)
+        #     batch_statistics['contains_nodata'] = True
+        #
+        #     none_cols = ['low_corr', 'lr_harm_path', 'lr_s2_path', 'hr_harm_path', 'hr_othofoto_path', 'hr_mask_path',
+        #                  'median_corr', 'all_corrs', 'all_nodata_perc',]
+        #
+        #     for col in none_cols:
+        #         batch_statistics[col] = None
+        #
+        #     selected_row = batch.loc[batch["s2_download_id"] == lowest_s2_key]
+        #     row_dict = selected_row.iloc[0].to_dict()
+        #     bad_substrings = ['Unnamed', 's2_available']
+        #     for k, v in row_dict.items():
+        #         if not any(sub in k for sub in bad_substrings):
+        #             batch_statistics[k] = v
 
-        # Best fitting sentinel2 sample for the current orthophoto
-        # s2_corrs_filtered = {k: v for k, v in s2_corrs.items() if v is not None}
-        # best_s2_key = max(s2_corrs_filtered, key=s2_corrs_filtered.get)
+        # apply shared mask
 
-        s2_merged = {k: (total_nodata_perc[k], s2_corrs[k]) for k in total_nodata_perc if k in s2_corrs}
-        s2_merged_filtered = {k: v for k, v in s2_merged.items() if None not in v}
-        s2_merged_filtered_sorted = dict(sorted(s2_merged_filtered.items(), key=lambda item: (1-item[1][0], item[1][1]), reverse=True))
-        best_s2_key = next(iter(s2_merged_filtered_sorted)) if len(s2_merged_filtered_sorted) > 0 else None
+        # filter and set the best suited tile
+        matched_dataset.set_best_tile()
+        masked_mdata = mdata * matched_dataset.best_tile.hr_nodata
+        masked_odata = odata * matched_dataset.best_tile.hr_nodata
 
-        if best_s2_key is None:
-            # select the onE with the lowest sentinel2 nodata values
-            lowest_s2_key = min(s2_nodata_perc, key=s2_nodata_perc.get)
+        ########### ADD METADATA ###########
+        batch_statistics['low_corr'] = matched_dataset.best_tile.s2_corr
+        batch_statistics['all_corrs'] = {tile.s2_id: tile.s2_corr for tile in matched_dataset.S2Batches.values()}
+        batch_statistics['all_nodata_perc'] = {tile.s2_id: tile.total_nodata_perc for tile in matched_dataset.S2Batches.values()}
+        batch_statistics['median_corr'] = matched_dataset.best_tile.median_corr
+        batch_statistics['s2_available'] = True
+        batch_statistics['nodata_total'] = matched_dataset.best_tile.total_nodata_perc
+        batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+        batch_statistics['nodata_s2'] = matched_dataset.best_tile.s2_nodata_perc
 
-            batch_statistics['s2_available'] = False
-            batch_statistics['nodata_total'] = round(np.sum(hr_nodata[lowest_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-            batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-            batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-            batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[lowest_s2_key] == 0) / (128*128), 5)
-            batch_statistics['contains_nodata'] = True
-
-            none_cols = ['low_corr', 'lr_harm_path', 'lr_s2_path', 'hr_harm_path', 'hr_othofoto_path', 'hr_mask_path',
-                         'median_corr', 'all_corrs', 'all_nodata_perc',]
-
-            for col in none_cols:
-                batch_statistics[col] = None
-
-            selected_row = batch.loc[batch["s2_download_id"] == lowest_s2_key]
-            row_dict = selected_row.iloc[0].to_dict()
-            bad_substrings = ['Unnamed', 's2_available']
-            for k, v in row_dict.items():
-                if not any(sub in k for sub in bad_substrings):
-                    batch_statistics[k] = v
-        else:
-            # apply shared mask
-            masked_mdata = mdata * hr_nodata[best_s2_key]
-            masked_odata = odata * hr_nodata[best_s2_key]
-
-            ########### ADD METADATA ###########
-            batch_statistics['low_corr'] = s2_corrs[best_s2_key]
-            batch_statistics['all_corrs'] = s2_corrs
-            batch_statistics['all_nodata_perc'] = total_nodata_perc
-            # batch_statistics['low_weighted_corr'] = weighted_corr[best_s2_key]
-            # batch_statistics['all_weighted_corrs'] = weighted_corr
-            batch_statistics['median_corr'] = median_corr[best_s2_key]
-            batch_statistics['s2_available'] = True
-            batch_statistics['nodata_total'] = round(np.sum(hr_nodata[best_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-            batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-            batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-            batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[best_s2_key] == 0) / ((IMG_SHAPE[0]/4) * (IMG_SHAPE[0]/4)), 5)
-
-            # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
-            selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
-            row_dict = selected_row.iloc[0].to_dict()
-            bad_substrings = ['Unnamed', 'dist_', 's2_available']
-            for k, v in row_dict.items():
-                #if 'Unnamed' not in k or 'dist_' not in k or 's2_available' not in k:
-                if not any(sub in k for sub in bad_substrings):
-                    batch_statistics[k] = v
-
-            # Recalculate mask distribution statistics after masking with nodata
-            mask_stats = calculate_mask_statistics(mask=masked_mdata)
-            for k, v in mask_stats.items():
+        # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
+        selected_row = batch.loc[batch["s2_download_id"] == matched_dataset.best_tile.s2_id]
+        row_dict = selected_row.iloc[0].to_dict()
+        bad_substrings = ['Unnamed', 'dist_', 's2_available']
+        for k, v in row_dict.items():
+            if not any(sub in k for sub in bad_substrings):
                 batch_statistics[k] = v
 
-            # derive nodata value on the nodata distribution value from the distribution, rounded to 5 decimals
-            if batch_statistics['nodata_total'] > 0:
-                batch_statistics['contains_nodata'] = True
-            else:
-                batch_statistics['contains_nodata'] = False
+        # Recalculate mask distribution statistics after masking with nodata
+        mask_stats = calculate_mask_statistics(mask=masked_mdata)
+        for k, v in mask_stats.items():
+            batch_statistics[k] = v
 
-            ########### WRITE FILES ###########
-            batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
-            batch_statistics['hr_othofoto_path'] = hr_orthofoto_path / f'HR_ortho_{new_id}.tif'
-            batch_statistics['hr_harm_path'] = hr_harm_path / f'HR_ortho_{new_id}.tif'
-            batch_statistics['lr_s2_path'] = lr_s2_path / f'S2_{new_id}.tif'
-            batch_statistics['lr_harm_path'] = lr_harm_path / f'S2_{new_id}.tif'
+        # derive nodata value on the nodata distribution value from the distribution, rounded to 5 decimals
+        if batch_statistics['nodata_total'] > 0:
+            batch_statistics['contains_nodata'] = True
+        else:
+            batch_statistics['contains_nodata'] = False
 
-            # Compressed HR-Mask
-            mprofile.update(
-                dtype=rasterio.uint8,
-                compress="zstd",
-                zstd_level=13,
-                interleave="band",
-                tiled=True,
-                blockxsize=128,
-                blockysize=128,
-                nodata=0,
-            )
-            with rasterio.open(hr_compressed_mask_path / f'HR_mask_{new_id}.tif', mode='w+', **mprofile) as dst:
-                dst.write(masked_mdata)
+        ########### WRITE FILES ###########
+        batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
+        batch_statistics['hr_othofoto_path'] = hr_orthofoto_path / f'HR_ortho_{new_id}.tif'
+        batch_statistics['hr_harm_path'] = hr_harm_path / f'HR_ortho_{new_id}.tif'
+        batch_statistics['lr_s2_path'] = lr_s2_path / f'S2_{new_id}.tif'
+        batch_statistics['lr_harm_path'] = lr_harm_path / f'S2_{new_id}.tif'
 
-            # Normal HR-Orthofoto
-            with rasterio.open(hr_orthofoto_path / f'HR_ortho_{new_id}.tif', mode='w+', **oprofile) as dst:
-                dst.write(masked_odata)
+        # Compressed HR-Mask
+        mprofile.update(
+            dtype=rasterio.uint8,
+            compress="zstd",
+            zstd_level=13,
+            interleave="band",
+            tiled=True,
+            blockxsize=128,
+            blockysize=128,
+            nodata=0,
+        )
+        with rasterio.open(hr_compressed_mask_path / f'HR_mask_{new_id}.tif', mode='w+', **mprofile) as dst:
+            dst.write(masked_mdata)
 
-            # Harmonized HR-Orthofoto
-            harm_hr_profile = oprofile.copy()
-            harm_hr_profile.update(
-                dtype=rasterio.uint16,
-                compress="zstd",
-                zstd_level=13,
-                interleave="band",
-                tiled=True,
-                blockxsize=128,
-                blockysize=128,
-                discard_lsb=2,
-                nodata=0,
-            )
+        # Normal HR-Orthofoto
+        with rasterio.open(hr_orthofoto_path / f'HR_ortho_{new_id}.tif', mode='w+', **oprofile) as dst:
+            dst.write(masked_odata)
 
-            with rasterio.open(hr_harm_path / f'HR_ortho_{new_id}.tif', "w", **harm_hr_profile) as dst:
-                dst.write((hr_harms[best_s2_key] * hr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
+        # Harmonized HR-Orthofoto
+        harm_hr_profile = oprofile.copy()
+        harm_hr_profile.update(
+            dtype=rasterio.uint16,
+            compress="zstd",
+            zstd_level=13,
+            interleave="band",
+            tiled=True,
+            blockxsize=128,
+            blockysize=128,
+            discard_lsb=2,
+            nodata=0,
+        )
 
-            # Normal S2
-            with rasterio.open(lr_s2_path / f'S2_{new_id}.tif', "w", **s2_profile) as dst:
-                lr_save_data = s2_data[best_s2_key] * lr_nodata[best_s2_key]
-                dst.write(lr_save_data)
+        with rasterio.open(hr_harm_path / f'HR_ortho_{new_id}.tif', "w", **harm_hr_profile) as dst:
+            dst.write((matched_dataset.best_tile.hr_harm * matched_dataset.best_tile.hr_nodata * 10_000).round().astype(rasterio.uint16))
+            #dst.write((hr_harms[best_s2_key] * hr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
-            # Harmonized S2
-            harm_lr_profile = s2_profile.copy()
-            harm_lr_profile.update(
-                dtype=rasterio.uint16,
-                compress="zstd",
-                count=4,
-                zstd_level=13,
-                interleave="band",
-                tiled=True,
-                discard_lsb=2
-            )
+        # Normal S2
+        with rasterio.open(lr_s2_path / f'S2_{new_id}.tif', "w", **s2_profile) as dst:
+            # lr_save_data = s2_data[best_s2_key] * lr_nodata[best_s2_key]
+            dst.write(s2_data[matched_dataset.best_tile.s2_id] * matched_dataset.best_tile.lr_nodata)
 
-            with rasterio.open(lr_harm_path / f'S2_{new_id}.tif', "w", **harm_lr_profile) as dst:
-                dst.write((lr_harms[best_s2_key] * lr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
+        # Harmonized S2
+        harm_lr_profile = s2_profile.copy()
+        harm_lr_profile.update(
+            dtype=rasterio.uint16,
+            compress="zstd",
+            count=4,
+            zstd_level=13,
+            interleave="band",
+            tiled=True,
+            discard_lsb=2
+        )
+
+        with rasterio.open(lr_harm_path / f'S2_{new_id}.tif', "w", **harm_lr_profile) as dst:
+            dst.write((matched_dataset.best_tile.lr_harm * matched_dataset.best_tile.lr_nodata * 10_000).round().astype(rasterio.uint16))
+            #dst.write((lr_harms[best_s2_key] * lr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
         # remove unwanted sentinel images
         # for i, row in batch.iterrows():
@@ -645,7 +699,9 @@ if __name__ == '__main__':
     #     res = list(tqdm(executor.map(_process_batch_partial, rows[:151]), total=len(rows)))
 
     out_df = pd.DataFrame.from_records(res)
+    out_gdf = to_squared_geopackage(data_=out_df)
     out_df.to_csv(BASE / 's2_ortho_download_data.csv')
+    out_gdf.to_file(BASE / 's2_ortho_download_data.gpkg', driver='GPKG')
 
     tstop = time.time()
     print(f'Script took {round(tstop - tstart, 2)}s')
