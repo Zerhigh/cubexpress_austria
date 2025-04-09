@@ -42,6 +42,10 @@ IMG_SHAPE = [512, 512]
 UPSAMPLE = 4
 DOWNSAMPLE = 0.25
 
+class MatchedData:
+    def __init__(self, id):
+        self.id = id
+
 
 def resample_mask_torch(arr: np.ndarray, scale_factor: float) -> np.ndarray:
     """
@@ -329,7 +333,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel images into memory (for all bands)
-        #download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        # download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
         s2_profile, s2_data = load_sentinel2_samples(path_list=batch_s2_paths)
         s2_profile.update(blockxsize=32, blockysize=32, nodata=0)
@@ -368,23 +372,29 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         nodata_lr_odata = resample_mask_torch(arr=nodata_hr_odata, scale_factor=0.25)  # (128, 128)
 
         # Harmonising and Matching
-        s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata, s2_nodata, weighted_corr, median_corr = {}, {}, {}, {}, {}, {}, {}, {}
+        s2_corrs, lr_harms, hr_harms, lr_nodata, hr_nodata, s2_nodata, median_corr, s2_nodata_perc, total_nodata_perc = {}, {}, {}, {}, {}, {}, {}, {}, {}
         for s2_name, s2_image in s2_data.items():
-            # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7]
+            # [4, 3, 2, 8] bands Required -> remapped to [3, 2, 1, 7] for R, G, B, NIR
             lr_s2_base = s2_image[[3, 2, 1, 7], :, :] / 10_000
 
             # create binary mask for filtering and homogenising all image data
             nodata_lr_s2 = np.all(lr_s2_base != 0, axis=0)  # (128, 128)
 
-            # introduce a filter to determine the nan amount in s2 and filter for it
-            perc_s2_nodata = np.sum(nodata_lr_s2 == 0) / (128 * 128)
-            if perc_s2_nodata >= 0.1:
-                # here comes the logic, also for metadata description if nothing is found
-                pass
-
             # Rescale and apply the mask for the hr component
             nodata_lr = np.all(np.stack([nodata_lr_s2, nodata_lr_mdata, nodata_lr_odata], axis=0) != 0, axis=0)  # (128, 128)
             nodata_hr = resample_mask_torch(arr=nodata_lr, scale_factor=4)  # (512, 512)
+
+            # if perc_s2_nodata >= 0.1:
+            #     # here comes the logic, also for metadata description if nothing is found
+            #     s2_corrs[s2_name] = None
+            #     lr_harms[s2_name] = None
+            #     hr_harms[s2_name] = None
+            #     lr_nodata[s2_name] = nodata_lr
+            #     hr_nodata[s2_name] = nodata_hr
+            #     s2_nodata[s2_name] = nodata_lr_s2
+            #     median_corr[s2_name] = None
+            #
+            #     continue
 
             # apply masks and normalize
             hr_ortho_norm = odata / 255
@@ -406,7 +416,6 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                           none_value=0, block_size=16)
 
             # Report the 10th percentile of the correlation (low correlation) without nans
-            # low_cor_self = np.nanquantile(corr_self, 0.10)
             low_corr = np.nanquantile(corr, 0.10)
             weighted_corr_coefficient = low_corr * (1 - np.sign(low_corr) * np.sum(nodata_lr == 0)/(128*128))
 
@@ -414,7 +423,6 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             #                      array3=hr_ortho_norm * nodata_hr,
             #                      figname=s2_name,
             #                      corr=[low_corr, weighted_corr])
-            # low_corr_ = np.nanquantile(corr_, 0.10)
 
             s2_corrs[s2_name] = round(float(low_corr), 4)
             lr_harms[s2_name] = lr_harm_self
@@ -423,108 +431,143 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
             hr_nodata[s2_name] = nodata_hr
             s2_nodata[s2_name] = nodata_lr_s2
             median_corr[s2_name] = np.nanmedian(corr)
-            weighted_corr[s2_name] = round(float(weighted_corr_coefficient), 4)
+            # introduce a filter to determine the nan amount in s2 and filter for it
+            s2_nodata_perc[s2_name] = round(float(np.sum(nodata_lr_s2 == 0) / (128 * 128)), 5)
+            total_nodata_perc[s2_name] = round(float(np.sum(nodata_lr == 0) / (128 * 128)), 5)
+            #weighted_corr[s2_name] = round(float(weighted_corr_coefficient), 4)
+
 
         # Best fitting sentinel2 sample for the current orthophoto
-        best_s2_key = max(weighted_corr, key=weighted_corr.get)
+        # s2_corrs_filtered = {k: v for k, v in s2_corrs.items() if v is not None}
+        # best_s2_key = max(s2_corrs_filtered, key=s2_corrs_filtered.get)
 
-        # apply shared mask
-        masked_mdata = mdata * hr_nodata[best_s2_key]
-        masked_odata = odata * hr_nodata[best_s2_key]
+        s2_merged = {k: (total_nodata_perc[k], s2_corrs[k]) for k in total_nodata_perc if k in s2_corrs}
+        s2_merged_filtered = {k: v for k, v in s2_merged.items() if None not in v}
+        s2_merged_filtered_sorted = dict(sorted(s2_merged_filtered.items(), key=lambda item: (1-item[1][0], item[1][1]), reverse=True))
+        best_s2_key = next(iter(s2_merged_filtered_sorted)) if len(s2_merged_filtered_sorted) > 0 else None
 
-        ########### ADD METADATA ###########
-        batch_statistics['low_corr'] = s2_corrs[best_s2_key]
-        batch_statistics['all_corrs'] = s2_corrs
-        batch_statistics['low_weighted_corr'] = weighted_corr[best_s2_key]
-        batch_statistics['all_weighted_corrs'] = weighted_corr
-        batch_statistics['median_corr'] = median_corr[best_s2_key]
-        batch_statistics['s2_available'] = True
-        batch_statistics['nodata_total'] = round(np.sum(hr_nodata[best_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-        batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-        batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
-        batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[best_s2_key] == 0) / ((IMG_SHAPE[0]/4) * (IMG_SHAPE[0]/4)), 5)
+        if best_s2_key is None:
+            # select the onE with the lowest sentinel2 nodata values
+            lowest_s2_key = min(s2_nodata_perc, key=s2_nodata_perc.get)
 
-        # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
-        selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
-        row_dict = selected_row.iloc[0].to_dict()
-        bad_substrings = ['Unnamed', 'dist_', 's2_available']
-        for k, v in row_dict.items():
-            #if 'Unnamed' not in k or 'dist_' not in k or 's2_available' not in k:
-            if not any(sub in k for sub in bad_substrings):
+            batch_statistics['s2_available'] = False
+            batch_statistics['nodata_total'] = round(np.sum(hr_nodata[lowest_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+            batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+            batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+            batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[lowest_s2_key] == 0) / (128*128), 5)
+            batch_statistics['contains_nodata'] = True
+
+            none_cols = ['low_corr', 'lr_harm_path', 'lr_s2_path', 'hr_harm_path', 'hr_othofoto_path', 'hr_mask_path',
+                         'median_corr', 'all_corrs', 'all_nodata_perc',]
+
+            for col in none_cols:
+                batch_statistics[col] = None
+
+            selected_row = batch.loc[batch["s2_download_id"] == lowest_s2_key]
+            row_dict = selected_row.iloc[0].to_dict()
+            bad_substrings = ['Unnamed', 's2_available']
+            for k, v in row_dict.items():
+                if not any(sub in k for sub in bad_substrings):
+                    batch_statistics[k] = v
+        else:
+            # apply shared mask
+            masked_mdata = mdata * hr_nodata[best_s2_key]
+            masked_odata = odata * hr_nodata[best_s2_key]
+
+            ########### ADD METADATA ###########
+            batch_statistics['low_corr'] = s2_corrs[best_s2_key]
+            batch_statistics['all_corrs'] = s2_corrs
+            batch_statistics['all_nodata_perc'] = total_nodata_perc
+            # batch_statistics['low_weighted_corr'] = weighted_corr[best_s2_key]
+            # batch_statistics['all_weighted_corrs'] = weighted_corr
+            batch_statistics['median_corr'] = median_corr[best_s2_key]
+            batch_statistics['s2_available'] = True
+            batch_statistics['nodata_total'] = round(np.sum(hr_nodata[best_s2_key] == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+            batch_statistics['nodata_ortho'] = round(np.sum(nodata_hr_odata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+            batch_statistics['nodata_mask'] = round(np.sum(nodata_hr_mdata == 0) / (IMG_SHAPE[0] * IMG_SHAPE[1]), 5)
+            batch_statistics['nodata_s2'] = round(np.sum(s2_nodata[best_s2_key] == 0) / ((IMG_SHAPE[0]/4) * (IMG_SHAPE[0]/4)), 5)
+
+            # add statistical info, except emtpy columns and statistics from the previous mask (before cropping)
+            selected_row = batch.loc[batch["s2_download_id"] == best_s2_key]
+            row_dict = selected_row.iloc[0].to_dict()
+            bad_substrings = ['Unnamed', 'dist_', 's2_available']
+            for k, v in row_dict.items():
+                #if 'Unnamed' not in k or 'dist_' not in k or 's2_available' not in k:
+                if not any(sub in k for sub in bad_substrings):
+                    batch_statistics[k] = v
+
+            # Recalculate mask distribution statistics after masking with nodata
+            mask_stats = calculate_mask_statistics(mask=masked_mdata)
+            for k, v in mask_stats.items():
                 batch_statistics[k] = v
 
-        # Recalculate mask distribution statistics after masking with nodata
-        mask_stats = calculate_mask_statistics(mask=masked_mdata)
-        for k, v in mask_stats.items():
-            batch_statistics[k] = v
+            # derive nodata value on the nodata distribution value from the distribution, rounded to 5 decimals
+            if batch_statistics['nodata_total'] > 0:
+                batch_statistics['contains_nodata'] = True
+            else:
+                batch_statistics['contains_nodata'] = False
 
-        # derive nodata value on the nodata distribution value from the distribution, rounded to 5 decimals
-        if batch_statistics['nodata_total'] > 0:
-            batch_statistics['contains_nodata'] = True
-        else:
-            batch_statistics['contains_nodata'] = False
+            ########### WRITE FILES ###########
+            batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
+            batch_statistics['hr_othofoto_path'] = hr_orthofoto_path / f'HR_ortho_{new_id}.tif'
+            batch_statistics['hr_harm_path'] = hr_harm_path / f'HR_ortho_{new_id}.tif'
+            batch_statistics['lr_s2_path'] = lr_s2_path / f'S2_{new_id}.tif'
+            batch_statistics['lr_harm_path'] = lr_harm_path / f'S2_{new_id}.tif'
 
-        ########### WRITE FILES ###########
-        batch_statistics['hr_mask_path'] = hr_compressed_mask_path / f'HR_mask_{new_id}.tif'
-        batch_statistics['hr_othofoto_path'] = hr_orthofoto_path / f'HR_ortho_{new_id}.tif'
-        batch_statistics['hr_harm_path'] = hr_harm_path / f'HR_ortho_{new_id}.tif'
-        batch_statistics['lr_s2_path'] = lr_s2_path / f'S2_{new_id}.tif'
-        batch_statistics['lr_harm_path'] = lr_harm_path / f'S2_{new_id}.tif'
+            # Compressed HR-Mask
+            mprofile.update(
+                dtype=rasterio.uint8,
+                compress="zstd",
+                zstd_level=13,
+                interleave="band",
+                tiled=True,
+                blockxsize=128,
+                blockysize=128,
+                nodata=0,
+            )
+            with rasterio.open(hr_compressed_mask_path / f'HR_mask_{new_id}.tif', mode='w+', **mprofile) as dst:
+                dst.write(masked_mdata)
 
-        # Compressed HR-Mask
-        mprofile.update(
-            dtype=rasterio.uint8,
-            compress="zstd",
-            zstd_level=13,
-            interleave="band",
-            tiled=True,
-            blockxsize=128,
-            blockysize=128,
-            nodata=0,
-        )
-        with rasterio.open(hr_compressed_mask_path / f'HR_mask_{new_id}.tif', mode='w+', **mprofile) as dst:
-            dst.write(masked_mdata)
+            # Normal HR-Orthofoto
+            with rasterio.open(hr_orthofoto_path / f'HR_ortho_{new_id}.tif', mode='w+', **oprofile) as dst:
+                dst.write(masked_odata)
 
-        # Normal HR-Orthofoto
-        with rasterio.open(hr_orthofoto_path / f'HR_ortho_{new_id}.tif', mode='w+', **oprofile) as dst:
-            dst.write(masked_odata)
+            # Harmonized HR-Orthofoto
+            harm_hr_profile = oprofile.copy()
+            harm_hr_profile.update(
+                dtype=rasterio.uint16,
+                compress="zstd",
+                zstd_level=13,
+                interleave="band",
+                tiled=True,
+                blockxsize=128,
+                blockysize=128,
+                discard_lsb=2,
+                nodata=0,
+            )
 
-        # Harmonized HR-Orthofoto
-        harm_hr_profile = oprofile.copy()
-        harm_hr_profile.update(
-            dtype=rasterio.uint16,
-            compress="zstd",
-            zstd_level=13,
-            interleave="band",
-            tiled=True,
-            blockxsize=128,
-            blockysize=128,
-            discard_lsb=2,
-            nodata=0,
-        )
+            with rasterio.open(hr_harm_path / f'HR_ortho_{new_id}.tif', "w", **harm_hr_profile) as dst:
+                dst.write((hr_harms[best_s2_key] * hr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
-        with rasterio.open(hr_harm_path / f'HR_ortho_{new_id}.tif', "w", **harm_hr_profile) as dst:
-            dst.write((hr_harms[best_s2_key] * hr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
+            # Normal S2
+            with rasterio.open(lr_s2_path / f'S2_{new_id}.tif', "w", **s2_profile) as dst:
+                lr_save_data = s2_data[best_s2_key] * lr_nodata[best_s2_key]
+                dst.write(lr_save_data)
 
-        # Normal S2
-        with rasterio.open(lr_s2_path / f'S2_{new_id}.tif', "w", **s2_profile) as dst:
-            lr_save_data = s2_data[best_s2_key] * lr_nodata[best_s2_key]
-            dst.write(lr_save_data)
+            # Harmonized S2
+            harm_lr_profile = s2_profile.copy()
+            harm_lr_profile.update(
+                dtype=rasterio.uint16,
+                compress="zstd",
+                count=4,
+                zstd_level=13,
+                interleave="band",
+                tiled=True,
+                discard_lsb=2
+            )
 
-        # Harmonized S2
-        harm_lr_profile = s2_profile.copy()
-        harm_lr_profile.update(
-            dtype=rasterio.uint16,
-            compress="zstd",
-            count=4,
-            zstd_level=13,
-            interleave="band",
-            tiled=True,
-            discard_lsb=2
-        )
-
-        with rasterio.open(lr_harm_path / f'S2_{new_id}.tif', "w", **harm_lr_profile) as dst:
-            dst.write((lr_harms[best_s2_key] * lr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
+            with rasterio.open(lr_harm_path / f'S2_{new_id}.tif', "w", **harm_lr_profile) as dst:
+                dst.write((lr_harms[best_s2_key] * lr_nodata[best_s2_key] * 10_000).round().astype(rasterio.uint16))
 
         # remove unwanted sentinel images
         # for i, row in batch.iterrows():
@@ -543,11 +586,11 @@ if __name__ == '__main__':
     if add_:
         table: pd.DataFrame = pd.read_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter.csv')
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
-        df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv')
+        df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmeta_sample_150imgs.csv')
     else:
         # df_filtered: pd.DataFrame = pd.read_csv(BASE / "/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv")
-        # df_filtered: pd.DataFrame = pd.read_csv(Path("tables") / "merged_ALL_S2_filter.csv")
-        df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
+        df_filtered: pd.DataFrame = pd.read_csv(Path("tables") / "merged_ALL_S2_filter_wmeta_sample_150imgs.csv")
+        #df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
 
     # ortho path
     # /data/USERS/shollend/orthophoto/austria_full_allclasses_regridded
@@ -581,7 +624,7 @@ if __name__ == '__main__':
     rows = [(idx, batch) for idx, batch in df_batches]
 
     res = []
-    for row in tqdm(rows[0:2]):
+    for row in tqdm(rows):
         res.append(_process_batch(data=row,
                                   hr_compressed_mask_path=out_ortho_target,
                                   hr_orthofoto_path=out_ortho_input,
@@ -599,7 +642,7 @@ if __name__ == '__main__':
     #
     # # Run parallel processing
     # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-    #     res = list(tqdm(executor.map(_process_batch_partial, rows[20:25]), total=len(rows)))
+    #     res = list(tqdm(executor.map(_process_batch_partial, rows[:151]), total=len(rows)))
 
     out_df = pd.DataFrame.from_records(res)
     out_df.to_csv(BASE / 's2_ortho_download_data.csv')
