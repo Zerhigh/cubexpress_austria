@@ -430,6 +430,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
         batch_statistics['low_corr'] = matched_dataset.best_tile.s2_corr
         batch_statistics['all_corrs'] = {tile.s2_id: tile.s2_corr for tile in matched_dataset.S2Batches.values()}
         batch_statistics['all_nodata_perc'] = {tile.s2_id: tile.total_nodata_perc for tile in matched_dataset.S2Batches.values()}
+        batch_statistics['all_s2_ids'] = {r['s2_download_id']: r['s2_full_id'] for _, r in batch.iterrows()}
         batch_statistics['median_corr'] = matched_dataset.best_tile.median_corr
         batch_statistics['s2_available'] = True
         batch_statistics['nodata_total'] = matched_dataset.best_tile.total_nodata_perc
@@ -576,28 +577,28 @@ if __name__ == '__main__':
     # Create a multiprocessing list of tasks
     rows = [(idx, batch) for idx, batch in df_batches]
 
-    # res = []
-    # for row in tqdm(rows):
-    #     res.append(_process_batch(data=row,
-    #                               orthofoto_path=inp_ortho_path,
-    #                               hr_compressed_mask_path=out_ortho_target,
-    #                               hr_orthofoto_path=out_ortho_input,
-    #                               hr_harm_path=out_ortho_input_harm,
-    #                               lr_s2_path=out_sentinel2,
-    #                               lr_harm_path=out_sentinel2_harm,
-    #                               ))
+    res = []
+    for row in tqdm(rows[:3]):
+        res.append(_process_batch(data=row,
+                                  orthofoto_path=inp_ortho_path,
+                                  hr_compressed_mask_path=out_ortho_target,
+                                  hr_orthofoto_path=out_ortho_input,
+                                  hr_harm_path=out_ortho_input_harm,
+                                  lr_s2_path=out_sentinel2,
+                                  lr_harm_path=out_sentinel2_harm,
+                                  ))
 
-    _process_batch_partial = partial(_process_batch,
-                                     orthofoto_path = inp_ortho_path,
-                                     hr_compressed_mask_path=out_ortho_target,
-                                     hr_orthofoto_path=out_ortho_input,
-                                     hr_harm_path=out_ortho_input_harm,
-                                     lr_s2_path=out_sentinel2,
-                                     lr_harm_path=out_sentinel2_harm,)
-
-    # Run parallel processing
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))
+    # _process_batch_partial = partial(_process_batch,
+    #                                  orthofoto_path = inp_ortho_path,
+    #                                  hr_compressed_mask_path=out_ortho_target,
+    #                                  hr_orthofoto_path=out_ortho_input,
+    #                                  hr_harm_path=out_ortho_input_harm,
+    #                                  lr_s2_path=out_sentinel2,
+    #                                  lr_harm_path=out_sentinel2_harm,)
+    #
+    # # Run parallel processing
+    # with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+    #     res = list(tqdm(executor.map(_process_batch_partial, rows), total=len(rows)))
 
     out_df = pd.DataFrame.from_records(res)
     out_df.to_csv(BASE / 's2_ortho_download_data.csv')
