@@ -31,8 +31,9 @@ except Exception as e:
     ee.Initialize(project='ee-samuelsuperresolution')
 
 # BASE = Path('/data/USERS/shollend/combined_download_nodata_test/')
-# BASE = Path('/home/shollend/shares/users/master/dl2/combined_download')
-BASE = Path('./local_experiment/')
+#BASE = Path('/home/shollend/shares/users/master/dl2/combined_download')
+BASE = Path('/data/USERS/shollend/combined_download')
+#BASE = Path('./local_experiment/')
 
 LABELS = (0, 40, 41, 42, 48, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 72, 83, 84, 87, 88, 92, 95, 96)
 IMG_SHAPE = [512, 512]
@@ -269,15 +270,24 @@ def masked_match_histograms(image: np.ndarray,
     matched = np.ma.array(np.empty(image.shape, dtype=image.dtype),
                           mask=image_mask, fill_value=fill_value)
 
-    for channel in range(masked_source_image.shape[0]):
-        matched_channel = exposure.match_histograms(masked_source_image[channel].compressed(),
-                                                    masked_reference_image[channel].compressed())
+    # if the whole image is a mask == no values existing, return the masked array with 0s
+    if matched.mask.all():
+        #print(matched.filled())
+        return matched.filled()
+    else:
+        for channel in range(masked_source_image.shape[0]):
+            # print(np.unique(masked_source_image[channel].compressed()))
+            # print(np.unique(masked_reference_image[channel].compressed()))
+            print(masked_source_image[channel].compressed().shape)
+            print(masked_reference_image[channel].compressed().shape)
+            matched_channel = exposure.match_histograms(masked_source_image[channel].compressed(),
+                                                        masked_reference_image[channel].compressed())
 
-        # Re-insert masked background
-        mask_ch = image_mask[channel]
-        matched[channel][~mask_ch] = matched_channel.ravel()
+            # Re-insert masked background
+            mask_ch = image_mask[channel]
+            matched[channel][~mask_ch] = matched_channel.ravel()
 
-    return matched.filled()
+        return matched.filled()
 
 
 def to_squared_geopackage(data_: pd.DataFrame) -> gpd.GeoDataFrame:
@@ -332,7 +342,7 @@ def _process_batch(data: Tuple[Hashable, pd.DataFrame],
                                                 gt['shearY'], gt['scaleY'] / UPSAMPLE, gt['translateY'])
 
         # download and load all sentinel tiles
-        # download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
+        download_sentinel2_samples(data=batch, geotransform=geotransform, output_path=BASE / 'tmp')
         batch_s2_paths = [Path(BASE / "tmp" / f"{row['s2_download_id']}.tif") for _, row in batch.iterrows()]
 
         # load all s2 tiles into memory (for all bands)
@@ -538,8 +548,8 @@ if __name__ == '__main__':
         df_filtered: pd.DataFrame = add_more_metadata(input_table=table)
         df_filtered.to_csv('/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmeta_sample_150imgs.csv')
     else:
-        # df_filtered: pd.DataFrame = pd.read_csv(BASE / "/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv")
-        df_filtered: pd.DataFrame = pd.read_csv(Path("tables") / "merged_ALL_S2_filter_wmeta_sample_150imgs.csv")
+        df_filtered: pd.DataFrame = pd.read_csv(BASE / "/home/shollend/shares/users/master/metadata/cubexpress/merged_ALL_S2_filter_wmetadata.csv")
+        #df_filtered: pd.DataFrame = pd.read_csv(Path("tables") / "merged_ALL_S2_filter_wmeta_sample_150imgs.csv")
         #df_filtered: pd.DataFrame = pd.read_csv(BASE / "sample_s2_wmeta.csv")
 
     # ortho path
@@ -553,7 +563,10 @@ if __name__ == '__main__':
     # /data/USERS/shollend/combined_download
 
     # generate folders
-    inp_ortho_path = Path('C:/Users/PC/Coding/cubexpress_austria/local_experiment/local_orthofotos')
+    #inp_ortho_path = Path('C:/Users/PC/Coding/cubexpress_austria/local_experiment/local_orthofotos')
+    #inp_ortho_path = Path('/home/shollend/shares/users/master/dl2/orthofoto/austria_full_classes')
+    inp_ortho_path = Path('/data/USERS/shollend/orthophoto/austria_full_classes_with_wine')
+
     out_ortho_target = BASE / 'output' / 'hr_mask'
     out_ortho_input = BASE / 'output' / 'hr_orthofoto'
     out_ortho_input_harm = BASE / 'output' / 'hr_harm_orthofoto'
@@ -603,8 +616,8 @@ if __name__ == '__main__':
     out_df = pd.DataFrame.from_records(res)
     out_df.to_csv(BASE / 's2_ortho_download_data.csv')
 
-    out_gdf = to_squared_geopackage(data_=out_df)
-    out_gdf.to_file(str(BASE / 's2_ortho_download_data.gpkg'), driver='GPKG')
+    # out_gdf = to_squared_geopackage(data_=out_df)
+    # out_gdf.to_file(str(BASE / 's2_ortho_download_data.gpkg'), driver='GPKG')
 
     tstop = time.time()
     print(f'Script took {round(tstop - tstart, 2)}s')
