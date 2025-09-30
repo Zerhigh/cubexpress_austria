@@ -5,3 +5,5 @@ output
 .~lock*
 local_experiment
 *.png
+test.py
+test2.py
